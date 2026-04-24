@@ -1,0 +1,59 @@
+:root {
+  --bg: #faf7f2;
+  --bg-elevated: #ffffff;
+  --bg-sunk: #f0ebe2;
+  --fg: #1a1612;
+  --muted-fg: #7a6f61;
+  --border: #e3dccf;
+  --border-strong: #1a1612;
+  --accent: #c44536;
+  --accent-dark: #8a2e22;
+  --accent-family: #2d6a4f;
+  --accent-adult: #6a4c93;
+  --accent-mixed: #b8860b;
+  --danger: #c44536;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Fraunces", "Cormorant Garamond", Georgia, serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+}
+
+input {
+  font-family: inherit;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
