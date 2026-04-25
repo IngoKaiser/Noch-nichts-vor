@@ -9,18 +9,16 @@ import {
   Euro,
   Users,
   ExternalLink,
-  Sparkles,
   AlertCircle,
-  X,
   Loader2,
-  BookOpen,
   Check,
+  Settings,
+  ChevronLeft,
 } from "lucide-react";
 import {
-  loadSources,
-  saveSources,
-  deleteSources,
-  listLocations,
+  loadActiveLocation,
+  saveActiveLocation,
+  clearActiveLocation,
 } from "@/lib/storage";
 import type {
   CandidateSource,
@@ -31,38 +29,39 @@ import type {
 } from "@/lib/types";
 
 const APP_NAME = "Noch nichts vor?";
-const APP_TAGLINE = "Lokaler Veranstaltungsfinder";
 
 type Phase = "idle" | "discovering" | "curating" | "searching";
+type View = "main" | "settings";
 
 export default function HomePage() {
-  const [location, setLocation] = useState("");
-  const [activeLocation, setActiveLocation] = useState<string | null>(null);
-  const [sources, setSources] = useState<EventSource[]>([]);
-  const [savedLocations, setSavedLocations] = useState<string[]>([]);
+  const [view, setView] = useState<View>("main");
+  const [locationInput, setLocationInput] = useState("");
+  const [activeRecord, setActiveRecord] = useState<SourceRecord | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
   const [timeFilter, setTimeFilter] = useState<TimeFilter>("today");
   const [customDate, setCustomDate] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [statusMsg, setStatusMsg] = useState("");
   const [error, setError] = useState("");
-  const [showSourcesPanel, setShowSourcesPanel] = useState(false);
-  const [lastQueryMeta, setLastQueryMeta] = useState<{ discoveredAt: string } | null>(null);
-
   const [candidateSources, setCandidateSources] = useState<CandidateSource[] | null>(null);
   const [curationLocation, setCurationLocation] = useState<string | null>(null);
+  const [hydrated, setHydrated] = useState(false);
 
+  // Load active location on mount, auto-load today's events
   useEffect(() => {
-    setSavedLocations(listLocations());
+    const rec = loadActiveLocation();
+    setActiveRecord(rec);
+    setHydrated(true);
+    if (rec) {
+      // Auto-load today's events for the active city
+      searchEventsInternal(rec.location, rec.sources, "today", "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  function refreshSavedLocations() {
-    setSavedLocations(listLocations());
-  }
 
   async function discoverCandidates(loc: string): Promise<CandidateSource[]> {
     setPhase("discovering");
-    setStatusMsg(`Identifiziere passende Quellen für ${loc}…`);
+    setStatusMsg(`Identifiziere Quellen für ${loc}…`);
     setError("");
     setCandidateSources(null);
 
@@ -86,9 +85,8 @@ export default function HomePage() {
     customDateStr: string
   ) {
     setPhase("searching");
-    setStatusMsg(`Suche Veranstaltungen in ${loc}…`);
+    setStatusMsg(`Suche Veranstaltungen…`);
     setError("");
-    setEvents([]);
 
     try {
       const res = await fetch("/api/events", {
@@ -111,21 +109,14 @@ export default function HomePage() {
       setStatusMsg("");
     } catch (e: any) {
       console.error(e);
-      setError(`Fehler bei Eventsuche: ${e.message}`);
+      setError(e.message);
       setPhase("idle");
     }
   }
 
   async function handleStartDiscovery() {
-    if (!location.trim()) return;
-    const loc = location.trim();
-
-    const existing = loadSources(loc);
-    if (existing) {
-      activateLocation(loc, existing);
-      await searchEventsInternal(loc, existing.sources, "today", "");
-      return;
-    }
+    if (!locationInput.trim()) return;
+    const loc = locationInput.trim();
 
     try {
       const candidates = await discoverCandidates(loc);
@@ -137,27 +128,28 @@ export default function HomePage() {
       setStatusMsg("");
     } catch (e: any) {
       console.error(e);
-      setError(`Fehler bei Quellensuche: ${e.message}`);
+      setError(e.message);
       setPhase("idle");
     }
   }
 
   async function handleRefreshSources() {
-    if (!activeLocation) return;
+    if (!activeRecord) return;
+    setView("main");
     try {
-      const candidates = await discoverCandidates(activeLocation);
-      const currentUrls = new Set(sources.map((s) => s.url));
+      const candidates = await discoverCandidates(activeRecord.location);
+      const currentUrls = new Set(activeRecord.sources.map((s) => s.url));
       setCandidateSources(
         candidates.map((s) => ({
           ...s,
           selected: currentUrls.has(s.url) || s.recommended !== false,
         }))
       );
-      setCurationLocation(activeLocation);
+      setCurationLocation(activeRecord.location);
       setPhase("curating");
       setStatusMsg("");
     } catch (e: any) {
-      setError(`Fehler bei Quellen-Auffrischung: ${e.message}`);
+      setError(e.message);
       setPhase("idle");
     }
   }
@@ -185,17 +177,43 @@ export default function HomePage() {
       return;
     }
 
+    // Step 1: probe adapters for each source (parallel, server-side)
+    setPhase("discovering");
+    setStatusMsg("Prüfe Quellen auf direkte Datenfeeds…");
+    setError("");
+
+    let probedSources: EventSource[] = selected;
+    try {
+      const res = await fetch("/api/probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sources: selected }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.sources)) probedSources = data.sources;
+      }
+      // If probe fails, fall through with un-probed sources;
+      // the events route will still work via the HTML adapter fallback.
+    } catch (e) {
+      console.error("Probe failed, falling back", e);
+    }
+
     const record: SourceRecord = {
       location: curationLocation,
-      sources: selected,
+      sources: probedSources,
       discoveredAt: new Date().toISOString(),
     };
-    saveSources(curationLocation, record);
-    refreshSavedLocations();
-    const loc = curationLocation;
-    activateLocation(loc, record);
+    saveActiveLocation(record);
+    setActiveRecord(record);
+    setCandidateSources(null);
+    setCurationLocation(null);
+    setPhase("idle");
+    setStatusMsg("");
+    setError("");
+    setEvents([]);
     setTimeFilter("today");
-    await searchEventsInternal(loc, selected, "today", "");
+    await searchEventsInternal(record.location, probedSources, "today", "");
   }
 
   function handleCancelCuration() {
@@ -206,40 +224,32 @@ export default function HomePage() {
     setError("");
   }
 
-  function activateLocation(loc: string, record: SourceRecord) {
-    setActiveLocation(loc);
-    setSources(record.sources);
-    setLastQueryMeta({ discoveredAt: record.discoveredAt });
-    setCandidateSources(null);
-    setCurationLocation(null);
-    setPhase("idle");
-    setStatusMsg("");
-    setError("");
-    setEvents([]);
-  }
-
   async function handleSearchEvents() {
-    if (!activeLocation || sources.length === 0) return;
+    if (!activeRecord) return;
     if (timeFilter === "custom" && !customDate) {
       setError("Bitte Datum wählen.");
       return;
     }
-    await searchEventsInternal(activeLocation, sources, timeFilter, customDate);
+    await searchEventsInternal(
+      activeRecord.location,
+      activeRecord.sources,
+      timeFilter,
+      customDate
+    );
   }
 
-  async function handleDeleteLocation(loc: string) {
-    deleteSources(loc);
-    refreshSavedLocations();
-    if (activeLocation === loc) {
-      setActiveLocation(null);
-      setSources([]);
-      setEvents([]);
-    }
+  function handleChangeCity() {
+    clearActiveLocation();
+    setActiveRecord(null);
+    setEvents([]);
+    setLocationInput("");
+    setView("main");
+    setError("");
   }
 
   const audienceConfig: Record<string, { label: string; color: string; icon: string }> = {
-    family: { label: "Familie 8–14", color: "var(--accent-family)", icon: "♡" },
-    adult: { label: "Erwachsene", color: "var(--accent-adult)", icon: "⬢" },
+    family: { label: "Familie", color: "var(--accent-family)", icon: "♡" },
+    adult: { label: "Erw.", color: "var(--accent-adult)", icon: "⬢" },
     mixed: { label: "Gemischt", color: "var(--accent-mixed)", icon: "◇" },
     unknown: { label: "Offen", color: "var(--muted-fg)", icon: "?" },
   };
@@ -248,7 +258,7 @@ export default function HomePage() {
     official: "Offiziell",
     editorial: "Redaktion",
     aggregator: "Aggregator",
-    venue: "Veranstaltungsort",
+    venue: "Venue",
     tourism: "Tourismus",
     commercial: "Kommerziell",
   };
@@ -262,657 +272,869 @@ export default function HomePage() {
     commercial: "#7a6f61",
   };
 
+  const adapterLabel: Record<string, string> = {
+    jsonld: "JSON-LD",
+    ical: "iCal",
+    rss: "RSS",
+    html: "HTML",
+    websearch: "Suche",
+  };
+
+  const adapterColor: Record<string, string> = {
+    jsonld: "#2d6a4f",
+    ical: "#2d6a4f",
+    rss: "#0066cc",
+    html: "#b8860b",
+    websearch: "#7a6f61",
+  };
+
   const isBusy = phase === "discovering" || phase === "searching";
   const inCuration = phase === "curating";
   const selectedCount = candidateSources?.filter((s) => s.selected).length || 0;
 
-  return (
-    <div style={styles.root}>
-      <header style={styles.header}>
-        <div style={styles.headerInner}>
-          <div style={styles.brand}>
-            <div style={styles.logoMark}>◉</div>
-            <div>
-              <div style={styles.brandKicker}>{APP_TAGLINE}</div>
-              <h1 style={styles.brandTitle}>{APP_NAME}</h1>
+  // Don't render until hydrated to prevent flash
+  if (!hydrated) {
+    return <div style={S.root} />;
+  }
+
+  // ============ CURATION VIEW ============
+  if (inCuration && candidateSources) {
+    return (
+      <div style={S.root}>
+        <header style={S.compactHeader}>
+          <button onClick={handleCancelCuration} style={S.backBtn} aria-label="Zurück">
+            <ChevronLeft size={20} />
+          </button>
+          <div style={S.compactTitle}>Quellen für {curationLocation}</div>
+          <div style={{ width: 36 }} />
+        </header>
+
+        <main style={S.main}>
+          <p style={S.curationIntro}>
+            {candidateSources.length} Quellen gefunden. Wähle aus, welche genutzt werden.
+          </p>
+
+          <div style={S.curationActions}>
+            <span style={S.selectedCounter}>
+              {selectedCount}/{candidateSources.length} ausgewählt
+            </span>
+            <div style={S.miniBtnGroup}>
+              <button onClick={() => selectAllCandidates(true)} style={S.miniBtn}>
+                Alle
+              </button>
+              <button onClick={() => selectAllCandidates(false)} style={S.miniBtn}>
+                Keine
+              </button>
+              <button
+                onClick={() =>
+                  setCandidateSources((prev) =>
+                    prev ? prev.map((s) => ({ ...s, selected: s.recommended !== false })) : prev
+                  )
+                }
+                style={S.miniBtn}
+              >
+                ★
+              </button>
             </div>
           </div>
-          <div style={styles.headerDate}>
+
+          <div style={S.candidateList}>
+            {candidateSources.map((s, i) => (
+              <label
+                key={i}
+                style={{
+                  ...S.candidateCard,
+                  ...(s.selected ? S.candidateCardActive : {}),
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={!!s.selected}
+                  onChange={() => toggleCandidate(i)}
+                  style={S.hiddenCheckbox}
+                />
+                <div
+                  style={{
+                    ...S.checkBox,
+                    ...(s.selected ? S.checkBoxActive : {}),
+                  }}
+                >
+                  {s.selected && <Check size={12} strokeWidth={3} />}
+                </div>
+                <div style={S.candidateContent}>
+                  <div style={S.candidateTopRow}>
+                    <span
+                      style={{
+                        ...S.candidateType,
+                        color: typeColor[s.type] || "var(--muted-fg)",
+                      }}
+                    >
+                      {typeLabel[s.type] || s.type}
+                    </span>
+                    {s.recommended && <span style={S.starBadge}>★</span>}
+                  </div>
+                  <div style={S.candidateName}>{s.name}</div>
+                  <div style={S.candidateFocus}>{s.focus}</div>
+                  <a
+                    href={s.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    style={S.candidateUrl}
+                  >
+                    {hostname(s.url)}
+                  </a>
+                </div>
+              </label>
+            ))}
+          </div>
+
+          {error && (
+            <div style={S.errorBar}>
+              <AlertCircle size={14} />
+              <span>{error}</span>
+            </div>
+          )}
+        </main>
+
+        {/* Sticky bottom action bar */}
+        <div style={S.bottomBar}>
+          <button onClick={handleCancelCuration} style={S.bottomBarGhost}>
+            Abbrechen
+          </button>
+          <button
+            onClick={handleConfirmSources}
+            disabled={selectedCount === 0}
+            style={{
+              ...S.bottomBarPrimary,
+              ...(selectedCount === 0 ? S.disabled : {}),
+            }}
+          >
+            <Check size={16} />
+            {selectedCount} übernehmen
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ============ SETTINGS VIEW ============
+  if (view === "settings" && activeRecord) {
+    return (
+      <div style={S.root}>
+        <header style={S.compactHeader}>
+          <button onClick={() => setView("main")} style={S.backBtn} aria-label="Zurück">
+            <ChevronLeft size={20} />
+          </button>
+          <div style={S.compactTitle}>Einstellungen</div>
+          <div style={{ width: 36 }} />
+        </header>
+
+        <main style={S.main}>
+          <div style={S.settingsSection}>
+            <div style={S.settingsLabel}>Aktive Stadt</div>
+            <div style={S.settingsCity}>{activeRecord.location}</div>
+            <div style={S.settingsMeta}>
+              {activeRecord.sources.length} Quellen · seit{" "}
+              {new Date(activeRecord.discoveredAt).toLocaleDateString("de-DE")}
+            </div>
+            <div style={S.settingsActions}>
+              <button onClick={handleRefreshSources} style={S.settingsBtn}>
+                <RefreshCw size={14} />
+                Quellen auffrischen
+              </button>
+              <button onClick={handleChangeCity} style={S.settingsBtn}>
+                <MapPin size={14} />
+                Stadt wechseln
+              </button>
+            </div>
+          </div>
+
+          <div style={S.settingsSection}>
+            <div style={S.settingsLabel}>Genutzte Quellen</div>
+            <div style={S.sourcesList}>
+              {activeRecord.sources.map((s, i) => (
+                <a
+                  key={i}
+                  href={s.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={S.sourceListItem}
+                >
+                  <div style={S.sourceListHeader}>
+                    <span
+                      style={{
+                        ...S.candidateType,
+                        color: typeColor[s.type] || "var(--accent)",
+                      }}
+                    >
+                      {typeLabel[s.type] || s.type}
+                    </span>
+                    {s.adapter && (
+                      <span
+                        style={{
+                          ...S.adapterBadge,
+                          color: adapterColor[s.adapter.kind] || "var(--muted-fg)",
+                          borderColor: adapterColor[s.adapter.kind] || "var(--border)",
+                        }}
+                        title={s.adapter.note || ""}
+                      >
+                        {adapterLabel[s.adapter.kind] || s.adapter.kind}
+                      </span>
+                    )}
+                    <ExternalLink size={11} style={{ color: "var(--muted-fg)", marginLeft: "auto" }} />
+                  </div>
+                  <div style={S.sourceListName}>{s.name}</div>
+                  <div style={S.sourceListUrl}>{hostname(s.url)}</div>
+                </a>
+              ))}
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // ============ EMPTY STATE (no city yet) ============
+  if (!activeRecord) {
+    return (
+      <div style={S.root}>
+        <main style={S.emptyMain}>
+          <div className="slide-up">
+            <div style={S.emptyMark}>◉</div>
+            <h1 style={S.emptyTitle} className="serif">
+              {APP_NAME}
+            </h1>
+            <p style={S.emptySub}>Lokaler Veranstaltungsfinder</p>
+          </div>
+
+          <div style={S.emptyForm} className="slide-up">
+            <p style={S.emptyHelp}>
+              Welche Stadt? Ich suche dann passende Quellen — du wählst aus.
+            </p>
+            <div style={S.inputWrap}>
+              <MapPin size={18} style={S.inputIcon} />
+              <input
+                type="text"
+                value={locationInput}
+                onChange={(e) => setLocationInput(e.target.value)}
+                placeholder="z.B. Hamburg"
+                style={S.input}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && locationInput.trim()) handleStartDiscovery();
+                }}
+                disabled={isBusy}
+                autoFocus
+              />
+            </div>
+            <button
+              onClick={handleStartDiscovery}
+              disabled={!locationInput.trim() || isBusy}
+              style={{
+                ...S.primaryFullBtn,
+                ...(!locationInput.trim() || isBusy ? S.disabled : {}),
+              }}
+            >
+              {phase === "discovering" ? (
+                <>
+                  <Loader2 size={16} className="spin" /> Quellen werden gesucht…
+                </>
+              ) : (
+                <>
+                  <Search size={16} /> Quellen suchen
+                </>
+              )}
+            </button>
+            {error && (
+              <div style={S.errorBar}>
+                <AlertCircle size={14} />
+                <span>{error}</span>
+              </div>
+            )}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // ============ MAIN VIEW (active city, events front and center) ============
+  return (
+    <div style={S.root}>
+      <header style={S.mainHeader}>
+        <div>
+          <div style={S.cityKicker}>
             {new Date().toLocaleDateString("de-DE", {
               weekday: "long",
               day: "numeric",
               month: "long",
             })}
           </div>
+          <h1 style={S.cityName} className="serif">
+            {activeRecord.location}
+          </h1>
         </div>
+        <button onClick={() => setView("settings")} style={S.iconBtn} aria-label="Einstellungen">
+          <Settings size={18} />
+        </button>
       </header>
 
-      <main style={styles.main}>
-        {!inCuration && (
-          <section style={styles.section}>
-            <div style={styles.sectionLabel}>01 — Ort wählen</div>
-            <div style={styles.locationRow}>
-              <div style={styles.inputWrap}>
-                <MapPin size={18} style={styles.inputIcon} />
-                <input
-                  type="text"
-                  value={location}
-                  onChange={(e) => setLocation(e.target.value)}
-                  placeholder="Stadt oder Region, z.B. Hamburg"
-                  style={styles.input}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && location.trim()) handleStartDiscovery();
-                  }}
-                  disabled={isBusy}
-                />
-              </div>
-              <button
-                onClick={handleStartDiscovery}
-                disabled={!location.trim() || isBusy}
-                style={{
-                  ...styles.primaryBtn,
-                  ...(!location.trim() || isBusy ? styles.btnDisabled : {}),
-                }}
-              >
-                {phase === "discovering" ? (
-                  <Loader2 size={16} className="spin" />
-                ) : (
-                  <Search size={16} />
-                )}
-                Quellen suchen
-              </button>
-            </div>
+      <main style={S.main}>
+        {/* TIME FILTERS — front and center */}
+        <div style={S.filterScroll}>
+          {[
+            { k: "today" as TimeFilter, label: "Heute" },
+            { k: "tonight" as TimeFilter, label: "Heute Abend" },
+            { k: "weekend" as TimeFilter, label: "Wochenende" },
+            { k: "custom" as TimeFilter, label: "Datum…" },
+          ].map((f) => (
+            <button
+              key={f.k}
+              onClick={() => {
+                setTimeFilter(f.k);
+                if (f.k !== "custom") {
+                  searchEventsInternal(
+                    activeRecord.location,
+                    activeRecord.sources,
+                    f.k,
+                    ""
+                  );
+                }
+              }}
+              style={{
+                ...S.filterBtn,
+                ...(timeFilter === f.k ? S.filterBtnActive : {}),
+              }}
+              disabled={isBusy}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
 
-            {savedLocations.length > 0 && (
-              <div style={styles.chipsWrap}>
-                <span style={styles.chipsLabel}>Gespeichert:</span>
-                {savedLocations.map((loc) => (
-                  <button
-                    key={loc}
-                    onClick={async () => {
-                      const rec = loadSources(loc);
-                      if (rec) {
-                        activateLocation(loc, rec);
-                        await searchEventsInternal(loc, rec.sources, "today", "");
-                      }
-                    }}
-                    disabled={isBusy}
-                    style={{
-                      ...styles.chip,
-                      ...(activeLocation === loc ? styles.chipActive : {}),
-                    }}
-                  >
-                    {loc}
-                    <X
-                      size={12}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteLocation(loc);
-                      }}
-                      style={styles.chipClose}
-                    />
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
-        )}
-
-        {(isBusy || error) && !inCuration && (
-          <div style={styles.statusBar}>
-            {isBusy && (
-              <Loader2 size={16} className="spin" style={{ color: "var(--accent)" }} />
-            )}
-            {error && <AlertCircle size={16} style={{ color: "var(--danger)" }} />}
-            <span style={{ color: error ? "var(--danger)" : "var(--fg)" }}>
-              {error || statusMsg}
-            </span>
+        {timeFilter === "custom" && (
+          <div style={S.customDateRow}>
+            <input
+              type="date"
+              value={customDate}
+              onChange={(e) => setCustomDate(e.target.value)}
+              style={S.dateInput}
+              disabled={isBusy}
+            />
+            <button
+              onClick={handleSearchEvents}
+              disabled={isBusy || !customDate}
+              style={{
+                ...S.searchBtn,
+                ...(isBusy || !customDate ? S.disabled : {}),
+              }}
+            >
+              <Search size={14} /> Suchen
+            </button>
           </div>
         )}
 
-        {inCuration && candidateSources && (
-          <section style={styles.section}>
-            <div style={styles.curationHeader}>
-              <div>
-                <div style={styles.sectionLabel}>
-                  02 — Quellen auswählen für {curationLocation}
-                </div>
-                <p style={styles.curationIntro}>
-                  Ich habe {candidateSources.length} Quellen identifiziert. Hake die ab, die
-                  du nutzen willst. Die Auswahl wird gespeichert und für alle weiteren
-                  Abfragen verwendet. Direkt danach lade ich die heutigen Events.
-                </p>
-              </div>
-              <div style={styles.curationStats}>
-                <div style={styles.curationCount}>
-                  {selectedCount}
-                  <span style={{ fontSize: 18, color: "var(--muted-fg)" }}>
-                    /{candidateSources.length}
-                  </span>
-                </div>
-                <div style={styles.curationCountLabel}>ausgewählt</div>
-              </div>
-            </div>
-
-            <div style={styles.curationActions}>
-              <button onClick={() => selectAllCandidates(true)} style={styles.miniBtn}>
-                Alle
-              </button>
-              <button onClick={() => selectAllCandidates(false)} style={styles.miniBtn}>
-                Keine
-              </button>
-              <button
-                onClick={() =>
-                  setCandidateSources((prev) =>
-                    prev
-                      ? prev.map((s) => ({ ...s, selected: s.recommended !== false }))
-                      : prev
-                  )
-                }
-                style={styles.miniBtn}
-              >
-                Empfohlene
-              </button>
-            </div>
-
-            <div style={styles.curationGrid}>
-              {candidateSources.map((s, i) => (
-                <label
-                  key={i}
-                  style={{
-                    ...styles.candidateCard,
-                    ...(s.selected ? styles.candidateCardActive : {}),
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={!!s.selected}
-                    onChange={() => toggleCandidate(i)}
-                    style={styles.hiddenCheckbox}
-                  />
-                  <div
-                    style={{
-                      ...styles.checkBox,
-                      ...(s.selected ? styles.checkBoxActive : {}),
-                    }}
-                  >
-                    {s.selected && <Check size={12} strokeWidth={3} />}
-                  </div>
-                  <div style={styles.candidateContent}>
-                    <div style={styles.candidateTopRow}>
-                      <span
-                        style={{
-                          ...styles.candidateType,
-                          color: typeColor[s.type] || "var(--muted-fg)",
-                        }}
-                      >
-                        {typeLabel[s.type] || s.type}
-                      </span>
-                      {s.recommended && (
-                        <span style={styles.recommendedBadge}>★ empfohlen</span>
-                      )}
-                    </div>
-                    <div style={styles.candidateName}>{s.name}</div>
-                    <div style={styles.candidateFocus}>{s.focus}</div>
-                    <a
-                      href={s.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      style={styles.candidateUrl}
-                    >
-                      <ExternalLink size={10} />{" "}
-                      {(() => {
-                        try {
-                          return new URL(s.url).hostname;
-                        } catch {
-                          return s.url;
-                        }
-                      })()}
-                    </a>
-                  </div>
-                </label>
-              ))}
-            </div>
-
-            {error && (
-              <div style={{ ...styles.statusBar, marginTop: 16 }}>
-                <AlertCircle size={16} style={{ color: "var(--danger)" }} />
-                <span style={{ color: "var(--danger)" }}>{error}</span>
-              </div>
-            )}
-
-            <div style={styles.curationFooter}>
-              <button onClick={handleCancelCuration} style={styles.ghostBtn}>
-                Abbrechen
-              </button>
-              <button
-                onClick={handleConfirmSources}
-                disabled={selectedCount === 0}
-                style={{
-                  ...styles.searchBtn,
-                  ...(selectedCount === 0 ? styles.btnDisabled : {}),
-                }}
-              >
-                <Check size={16} />
-                {selectedCount} {selectedCount === 1 ? "Quelle" : "Quellen"} übernehmen &
-                Events laden
-              </button>
-            </div>
-          </section>
+        {/* STATUS / ERROR */}
+        {isBusy && (
+          <div style={S.statusBar}>
+            <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
+            <span>{statusMsg}</span>
+          </div>
+        )}
+        {error && (
+          <div style={S.errorBar}>
+            <AlertCircle size={14} />
+            <span>{error}</span>
+            <button
+              onClick={handleSearchEvents}
+              style={S.retryBtn}
+              disabled={isBusy}
+            >
+              Erneut
+            </button>
+          </div>
         )}
 
-        {activeLocation && !inCuration && (
-          <>
-            <section style={styles.section}>
-              <div style={styles.activeLocBar}>
-                <div>
-                  <div style={styles.sectionLabel}>Aktive Quelle</div>
-                  <div style={styles.activeLocName}>{activeLocation}</div>
-                  {lastQueryMeta?.discoveredAt && (
-                    <div style={styles.activeLocMeta}>
-                      {sources.length} Quellen · identifiziert am{" "}
-                      {new Date(lastQueryMeta.discoveredAt).toLocaleDateString("de-DE")}
-                      {" · "}
-                      <button
-                        onClick={() => setShowSourcesPanel((s) => !s)}
-                        style={styles.linkBtn}
-                      >
-                        {showSourcesPanel ? "ausblenden" : "anzeigen"}
-                      </button>
+        {/* EVENTS */}
+        {events.length > 0 && (
+          <div style={S.eventsList} className="slide-up">
+            {events.map((ev, i) => {
+              const aud = audienceConfig[ev.audience] || audienceConfig.unknown;
+              return (
+                <article key={i} style={S.eventCard}>
+                  <div style={S.eventHeader}>
+                    <div
+                      style={{
+                        ...S.audienceBadge,
+                        color: aud.color,
+                        borderColor: aud.color,
+                      }}
+                    >
+                      <span>{aud.icon}</span> {aud.label}
+                    </div>
+                    <div style={S.eventTime}>
+                      <Clock size={11} />
+                      {formatDateTime(ev.datetime)}
+                    </div>
+                  </div>
+                  <h3 style={S.eventTitle}>{ev.title}</h3>
+                  {ev.description && <p style={S.eventDesc}>{ev.description}</p>}
+                  <div style={S.eventMetaRow}>
+                    <div style={S.metaItem}>
+                      <MapPin size={12} />
+                      <span>{ev.location || "Ort offen"}</span>
+                    </div>
+                    <div style={S.metaItem}>
+                      <Euro size={12} />
+                      <span>{ev.cost || "?"}</span>
+                    </div>
+                  </div>
+                  {ev.audienceReason && (
+                    <div style={S.audienceReason}>
+                      <Users size={10} /> {ev.audienceReason}
                     </div>
                   )}
-                </div>
-                <button
-                  onClick={handleRefreshSources}
-                  disabled={isBusy}
-                  style={styles.ghostBtn}
-                  title="Quellen neu identifizieren"
-                >
-                  {phase === "discovering" ? (
-                    <Loader2 size={14} className="spin" />
-                  ) : (
-                    <RefreshCw size={14} />
-                  )}
-                  Quellen auffrischen
-                </button>
-              </div>
-
-              {showSourcesPanel && (
-                <div style={styles.sourcesGrid}>
-                  {sources.map((s, i) => (
+                  {ev.sourceUrl && (
                     <a
-                      key={i}
-                      href={s.url}
+                      href={ev.sourceUrl}
                       target="_blank"
                       rel="noreferrer"
-                      style={styles.sourceCard}
+                      style={S.eventSource}
                     >
-                      <div
-                        style={{
-                          ...styles.sourceType,
-                          color: typeColor[s.type] || "var(--accent)",
-                        }}
-                      >
-                        {typeLabel[s.type] || s.type}
-                      </div>
-                      <div style={styles.sourceName}>{s.name}</div>
-                      <div style={styles.sourceFocus}>{s.focus}</div>
-                      <div style={styles.sourceUrl}>
-                        <ExternalLink size={11} />{" "}
-                        {(() => {
-                          try {
-                            return new URL(s.url).hostname;
-                          } catch {
-                            return s.url;
-                          }
-                        })()}
-                      </div>
+                      {ev.sourceName || "Quelle"} <ExternalLink size={10} />
                     </a>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section style={styles.section}>
-              <div style={styles.sectionLabel}>03 — Zeitraum</div>
-              <div style={styles.timeFilters}>
-                {[
-                  { k: "today" as TimeFilter, label: "Heute" },
-                  { k: "tonight" as TimeFilter, label: "Heute Abend" },
-                  { k: "weekend" as TimeFilter, label: "Wochenende" },
-                  { k: "custom" as TimeFilter, label: "Datum…" },
-                ].map((f) => (
-                  <button
-                    key={f.k}
-                    onClick={() => setTimeFilter(f.k)}
-                    style={{
-                      ...styles.filterBtn,
-                      ...(timeFilter === f.k ? styles.filterBtnActive : {}),
-                    }}
-                    disabled={isBusy}
-                  >
-                    {f.label}
-                  </button>
-                ))}
-                {timeFilter === "custom" && (
-                  <input
-                    type="date"
-                    value={customDate}
-                    onChange={(e) => setCustomDate(e.target.value)}
-                    style={styles.dateInput}
-                    disabled={isBusy}
-                  />
-                )}
-              </div>
-              <button
-                onClick={handleSearchEvents}
-                disabled={isBusy}
-                style={{
-                  ...styles.searchBtn,
-                  ...(isBusy ? styles.btnDisabled : {}),
-                }}
-              >
-                {phase === "searching" ? (
-                  <Loader2 size={16} className="spin" />
-                ) : (
-                  <Search size={16} />
-                )}
-                Veranstaltungen suchen
-              </button>
-            </section>
-
-            {events.length > 0 && (
-              <section style={styles.section}>
-                <div style={styles.sectionLabel}>
-                  04 — Gefundene Veranstaltungen · {events.length}
-                </div>
-                <div style={styles.eventsGrid}>
-                  {events.map((ev, i) => {
-                    const aud = audienceConfig[ev.audience] || audienceConfig.unknown;
-                    return (
-                      <article key={i} style={styles.eventCard}>
-                        <div style={styles.eventHeader}>
-                          <div
-                            style={{
-                              ...styles.audienceBadge,
-                              color: aud.color,
-                              borderColor: aud.color,
-                            }}
-                          >
-                            <span>{aud.icon}</span> {aud.label}
-                          </div>
-                          <div style={styles.eventIndex}>
-                            {String(i + 1).padStart(2, "0")}
-                          </div>
-                        </div>
-                        <h3 style={styles.eventTitle}>{ev.title}</h3>
-                        <div style={styles.eventMeta}>
-                          <div style={styles.metaRow}>
-                            <Clock size={13} />
-                            <span>{ev.datetime || "Zeit unbekannt"}</span>
-                          </div>
-                          <div style={styles.metaRow}>
-                            <MapPin size={13} />
-                            <span>{ev.location || "Ort unbekannt"}</span>
-                          </div>
-                          <div style={styles.metaRow}>
-                            <Euro size={13} />
-                            <span>{ev.cost || "unbekannt"}</span>
-                          </div>
-                        </div>
-                        {ev.description && <p style={styles.eventDesc}>{ev.description}</p>}
-                        {ev.audienceReason && (
-                          <div style={styles.audienceReason}>
-                            <Users size={11} /> {ev.audienceReason}
-                          </div>
-                        )}
-                        {ev.sourceUrl && (
-                          <a
-                            href={ev.sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={styles.eventSource}
-                          >
-                            <BookOpen size={11} /> {ev.sourceName || "Quelle"}{" "}
-                            <ExternalLink size={10} />
-                          </a>
-                        )}
-                      </article>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
-
-            {phase === "idle" && events.length === 0 && !error && (
-              <div style={styles.emptyHint}>
-                <Sparkles size={14} /> Keine Events gefunden. Zeitraum ändern oder erneut
-                suchen.
-              </div>
-            )}
-          </>
+                  )}
+                </article>
+              );
+            })}
+          </div>
         )}
 
-        {!activeLocation && !inCuration && !isBusy && savedLocations.length === 0 &&
-          !error && (
-            <div style={styles.welcome}>
-              <div style={styles.welcomeMark}>✺</div>
-              <h2 style={styles.welcomeTitle}>Finde heraus, was gerade läuft.</h2>
-              <p style={styles.welcomeText}>
-                Ort eingeben. Passende Quellen auswählen. Events erscheinen automatisch —
-                erst für heute, danach filterbar nach Abend, Wochenende oder eigenem Datum.
-              </p>
-            </div>
-          )}
+        {!isBusy && events.length === 0 && !error && (
+          <div style={S.emptyResults}>
+            Keine Events für diesen Zeitraum gefunden.
+          </div>
+        )}
       </main>
-
-      <footer style={styles.footer}>
-        <span>Quellen lokal gespeichert · Auffrischung bei Bedarf</span>
-      </footer>
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  root: { minHeight: "100vh" },
-  header: {
-    borderBottom: "1px solid var(--border)",
-    background: "var(--bg)",
-    position: "sticky",
-    top: 0,
-    zIndex: 20,
-    backdropFilter: "blur(12px)",
+function hostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+function formatDateTime(s: string): string {
+  if (!s) return "?";
+  // Try ISO-like "2026-04-25 19:30"
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{1,2}):(\d{2}))?/);
+  if (m) {
+    const date = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4] || "00"}:${m[5] || "00"}`);
+    if (!isNaN(date.getTime())) {
+      const today = new Date();
+      const isToday = date.toDateString() === today.toDateString();
+      const day = isToday
+        ? "heute"
+        : date.toLocaleDateString("de-DE", { weekday: "short", day: "numeric", month: "short" });
+      if (m[4]) {
+        return `${day}, ${m[4]}:${m[5]}`;
+      }
+      return day;
+    }
+  }
+  return s;
+}
+
+const S: Record<string, React.CSSProperties> = {
+  root: {
+    minHeight: "100vh",
+    paddingBottom: "env(safe-area-inset-bottom)",
   },
-  headerInner: {
-    maxWidth: 1200,
-    margin: "0 auto",
-    padding: "20px 28px",
+
+  // Empty state
+  emptyMain: {
+    minHeight: "100vh",
     display: "flex",
-    justifyContent: "space-between",
-    alignItems: "flex-end",
-    gap: 20,
+    flexDirection: "column",
+    justifyContent: "center",
+    padding: "32px 20px",
+    maxWidth: 480,
+    margin: "0 auto",
+    gap: 32,
   },
-  brand: { display: "flex", alignItems: "center", gap: 14 },
-  logoMark: { fontSize: 32, color: "var(--accent)", lineHeight: 1 },
-  brandKicker: {
-    fontSize: 10,
-    letterSpacing: "0.18em",
-    textTransform: "uppercase",
-    color: "var(--muted-fg)",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    fontWeight: 500,
+  emptyMark: {
+    fontSize: 36,
+    color: "var(--accent)",
+    marginBottom: 8,
   },
-  brandTitle: {
-    fontSize: 28,
+  emptyTitle: {
+    fontSize: 32,
     fontWeight: 600,
     letterSpacing: "-0.02em",
     margin: 0,
-    lineHeight: 1,
-    marginTop: 4,
+    lineHeight: 1.1,
   },
-  headerDate: {
-    fontSize: 12,
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
+  emptySub: {
+    fontSize: 14,
     color: "var(--muted-fg)",
-    fontFamily: "'Inter', system-ui, sans-serif",
+    margin: "8px 0 0 0",
+    letterSpacing: "0.04em",
+    textTransform: "uppercase",
   },
-  main: { maxWidth: 1200, margin: "0 auto", padding: "36px 28px 80px" },
-  section: { marginBottom: 40, animation: "slideUp 0.4s ease-out" },
-  sectionLabel: {
+  emptyForm: { display: "flex", flexDirection: "column", gap: 12 },
+  emptyHelp: {
+    fontSize: 14,
+    color: "var(--muted-fg)",
+    lineHeight: 1.5,
+    margin: "0 0 4px 0",
+  },
+
+  // Main view header
+  mainHeader: {
+    padding: "20px 20px 16px",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+    background: "var(--bg)",
+    borderBottom: "1px solid var(--border)",
+    position: "sticky",
+    top: 0,
+    zIndex: 10,
+    backdropFilter: "blur(12px)",
+  },
+  cityKicker: {
     fontSize: 10,
-    letterSpacing: "0.22em",
+    letterSpacing: "0.14em",
     textTransform: "uppercase",
     color: "var(--muted-fg)",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    fontWeight: 600,
-    marginBottom: 14,
+    fontWeight: 500,
+    marginBottom: 2,
   },
-  locationRow: { display: "flex", gap: 10, flexWrap: "wrap" },
-  inputWrap: {
-    flex: "1 1 280px",
-    position: "relative",
+  cityName: {
+    fontSize: 22,
+    fontWeight: 600,
+    letterSpacing: "-0.01em",
+    margin: 0,
+    lineHeight: 1.1,
+  },
+  iconBtn: {
+    width: 36,
+    height: 36,
+    border: "1px solid var(--border)",
+    background: "var(--bg-elevated)",
+    cursor: "pointer",
     display: "flex",
     alignItems: "center",
+    justifyContent: "center",
+    color: "var(--fg)",
+    borderRadius: 0,
+    flexShrink: 0,
   },
+
+  // Compact header (curation, settings)
+  compactHeader: {
+    padding: "12px 12px",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 8,
+    background: "var(--bg)",
+    borderBottom: "1px solid var(--border)",
+    position: "sticky",
+    top: 0,
+    zIndex: 10,
+  },
+  backBtn: {
+    width: 36,
+    height: 36,
+    border: "none",
+    background: "transparent",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "var(--fg)",
+  },
+  compactTitle: {
+    fontSize: 14,
+    fontWeight: 600,
+    flex: 1,
+    textAlign: "center",
+    letterSpacing: "-0.01em",
+  },
+
+  main: { padding: "16px 16px 80px", maxWidth: 720, margin: "0 auto" },
+
+  // Inputs
+  inputWrap: { position: "relative", display: "flex", alignItems: "center" },
   inputIcon: {
     position: "absolute",
-    left: 16,
+    left: 14,
     color: "var(--muted-fg)",
     pointerEvents: "none",
   },
   input: {
     width: "100%",
-    padding: "14px 16px 14px 44px",
-    fontSize: 16,
+    padding: "14px 14px 14px 42px",
+    fontSize: 16, // 16px prevents iOS zoom
     border: "1px solid var(--border)",
     borderRadius: 0,
     background: "var(--bg-elevated)",
     color: "var(--fg)",
     outline: "none",
   },
-  primaryBtn: {
-    padding: "14px 22px",
+  primaryFullBtn: {
+    width: "100%",
+    padding: "14px 16px",
     fontSize: 14,
-    fontWeight: 500,
+    fontWeight: 600,
     background: "var(--fg)",
     color: "var(--bg)",
     border: "none",
     cursor: "pointer",
     display: "inline-flex",
     alignItems: "center",
+    justifyContent: "center",
     gap: 8,
-    fontFamily: "'Inter', system-ui, sans-serif",
     letterSpacing: "0.02em",
   },
-  btnDisabled: { opacity: 0.4, cursor: "not-allowed" },
-  chipsWrap: {
+  disabled: { opacity: 0.4, cursor: "not-allowed" },
+
+  // Filters
+  filterScroll: {
     display: "flex",
     gap: 8,
-    flexWrap: "wrap",
-    marginTop: 14,
-    alignItems: "center",
+    overflowX: "auto",
+    WebkitOverflowScrolling: "touch",
+    paddingBottom: 8,
+    marginBottom: 12,
+    scrollbarWidth: "none",
   },
-  chipsLabel: {
-    fontSize: 11,
-    color: "var(--muted-fg)",
-    textTransform: "uppercase",
-    letterSpacing: "0.12em",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    marginRight: 4,
-  },
-  chip: {
-    padding: "6px 10px 6px 12px",
-    fontSize: 13,
-    background: "var(--bg-sunk)",
+  filterBtn: {
+    padding: "10px 16px",
+    fontSize: 14,
+    background: "var(--bg-elevated)",
     border: "1px solid var(--border)",
+    cursor: "pointer",
+    color: "var(--fg)",
+    whiteSpace: "nowrap",
+    flexShrink: 0,
+    fontWeight: 500,
+  },
+  filterBtnActive: {
+    background: "var(--fg)",
+    color: "var(--bg)",
+    borderColor: "var(--fg)",
+  },
+  customDateRow: {
+    display: "flex",
+    gap: 8,
+    marginBottom: 12,
+  },
+  dateInput: {
+    flex: 1,
+    padding: "10px 12px",
+    fontSize: 16,
+    border: "1px solid var(--border)",
+    background: "var(--bg-elevated)",
+    color: "var(--fg)",
+  },
+  searchBtn: {
+    padding: "10px 16px",
+    fontSize: 13,
+    fontWeight: 600,
+    background: "var(--accent)",
+    color: "#fff",
+    border: "none",
     cursor: "pointer",
     display: "inline-flex",
     alignItems: "center",
     gap: 6,
-    color: "var(--fg)",
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
   },
-  chipActive: { background: "var(--fg)", color: "var(--bg)", borderColor: "var(--fg)" },
-  chipClose: { opacity: 0.6, marginLeft: 2 },
+
+  // Status
   statusBar: {
-    padding: "12px 16px",
+    padding: "12px 14px",
     background: "var(--bg-elevated)",
     border: "1px solid var(--border)",
     display: "flex",
     alignItems: "center",
     gap: 10,
-    marginBottom: 24,
-    fontSize: 14,
-    fontFamily: "'Inter', system-ui, sans-serif",
-  },
-
-  curationHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: 20,
-    marginBottom: 18,
-    flexWrap: "wrap",
-  },
-  curationIntro: {
-    fontSize: 15,
-    color: "var(--muted-fg)",
-    lineHeight: 1.5,
-    fontFamily: "'Inter', system-ui, sans-serif",
-    margin: "6px 0 0 0",
-    maxWidth: 640,
-  },
-  curationStats: {
-    textAlign: "right",
-    padding: "10px 18px",
-    border: "1px solid var(--border)",
-    background: "var(--bg-elevated)",
-  },
-  curationCount: {
-    fontSize: 36,
-    fontWeight: 500,
-    lineHeight: 1,
-    color: "var(--accent)",
-  },
-  curationCountLabel: {
-    fontSize: 10,
-    letterSpacing: "0.14em",
-    textTransform: "uppercase",
-    color: "var(--muted-fg)",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    marginTop: 4,
-  },
-  curationActions: { display: "flex", gap: 8, marginBottom: 16 },
-  miniBtn: {
-    padding: "6px 12px",
-    fontSize: 11,
-    background: "transparent",
-    border: "1px solid var(--border)",
-    cursor: "pointer",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
+    marginBottom: 16,
+    fontSize: 13,
     color: "var(--fg)",
   },
-  curationGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+  errorBar: {
+    padding: "12px 14px",
+    background: "#fef2f0",
+    border: "1px solid var(--accent)",
+    display: "flex",
+    alignItems: "center",
     gap: 10,
+    marginBottom: 16,
+    fontSize: 13,
+    color: "var(--accent-dark)",
+    borderRadius: 4,
+    flexWrap: "wrap",
+  },
+  retryBtn: {
+    marginLeft: "auto",
+    padding: "4px 10px",
+    fontSize: 11,
+    background: "var(--accent)",
+    color: "#fff",
+    border: "none",
+    cursor: "pointer",
+    fontWeight: 600,
+    letterSpacing: "0.04em",
+    textTransform: "uppercase",
+  },
+
+  // Events
+  eventsList: { display: "flex", flexDirection: "column", gap: 12 },
+  eventCard: {
+    padding: "16px",
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  eventHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  audienceBadge: {
+    fontSize: 9,
+    letterSpacing: "0.12em",
+    textTransform: "uppercase",
+    padding: "2px 7px",
+    border: "1px solid",
+    fontWeight: 700,
+    display: "inline-flex",
+    gap: 4,
+    alignItems: "center",
+  },
+  eventTime: {
+    fontSize: 12,
+    color: "var(--muted-fg)",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    fontWeight: 500,
+  },
+  eventTitle: {
+    fontSize: 17,
+    fontWeight: 600,
+    letterSpacing: "-0.01em",
+    lineHeight: 1.25,
+    margin: 0,
+    fontFamily: "Georgia, serif",
+  },
+  eventDesc: {
+    fontSize: 13,
+    color: "var(--muted-fg)",
+    lineHeight: 1.45,
+    margin: 0,
+  },
+  eventMetaRow: {
+    display: "flex",
+    gap: 12,
+    flexWrap: "wrap",
+    fontSize: 12,
+    color: "var(--fg)",
+    paddingTop: 6,
+    borderTop: "1px dashed var(--border)",
+  },
+  metaItem: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+  },
+  audienceReason: {
+    fontSize: 11,
+    color: "var(--muted-fg)",
+    fontStyle: "italic",
+    display: "inline-flex",
+    gap: 5,
+    alignItems: "center",
+  },
+  eventSource: {
+    fontSize: 11,
+    color: "var(--accent)",
+    textDecoration: "none",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+    fontWeight: 600,
+    letterSpacing: "0.02em",
+    marginTop: 4,
+  },
+  emptyResults: {
+    textAlign: "center",
+    padding: "40px 20px",
+    color: "var(--muted-fg)",
+    fontSize: 13,
+  },
+
+  // Curation
+  curationIntro: {
+    fontSize: 14,
+    color: "var(--muted-fg)",
+    lineHeight: 1.5,
+    margin: "0 0 16px 0",
+  },
+  curationActions: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 16,
+    flexWrap: "wrap",
+  },
+  selectedCounter: {
+    fontSize: 13,
+    color: "var(--fg)",
+    fontWeight: 600,
+  },
+  miniBtnGroup: { display: "flex", gap: 4 },
+  miniBtn: {
+    padding: "6px 10px",
+    fontSize: 11,
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border)",
+    cursor: "pointer",
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+    color: "var(--fg)",
+    fontWeight: 600,
+  },
+  candidateList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    paddingBottom: 100, // Space for sticky bottom bar
   },
   candidateCard: {
     display: "flex",
     gap: 12,
-    padding: "14px 16px",
+    padding: "12px 14px",
     background: "var(--bg-elevated)",
     border: "1px solid var(--border)",
     cursor: "pointer",
-    transition: "all 0.15s",
     position: "relative",
   },
   candidateCardActive: {
     borderColor: "var(--fg)",
-    background: "var(--bg)",
     boxShadow: "inset 3px 0 0 var(--accent)",
   },
   hiddenCheckbox: { position: "absolute", opacity: 0, pointerEvents: "none" },
@@ -933,7 +1155,7 @@ const styles: Record<string, React.CSSProperties> = {
     flex: 1,
     display: "flex",
     flexDirection: "column",
-    gap: 3,
+    gap: 2,
     minWidth: 0,
   },
   candidateTopRow: {
@@ -944,85 +1166,111 @@ const styles: Record<string, React.CSSProperties> = {
   },
   candidateType: {
     fontSize: 9,
-    letterSpacing: "0.18em",
+    letterSpacing: "0.16em",
     textTransform: "uppercase",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    fontWeight: 600,
+    fontWeight: 700,
   },
-  recommendedBadge: {
-    fontSize: 9,
-    letterSpacing: "0.1em",
-    textTransform: "uppercase",
+  starBadge: {
+    fontSize: 12,
     color: "var(--accent-mixed)",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    fontWeight: 600,
   },
-  candidateName: { fontSize: 15, fontWeight: 500, lineHeight: 1.25, marginTop: 2 },
+  candidateName: {
+    fontSize: 15,
+    fontWeight: 600,
+    lineHeight: 1.25,
+    marginTop: 2,
+  },
   candidateFocus: {
     fontSize: 12,
     color: "var(--muted-fg)",
     lineHeight: 1.4,
-    fontFamily: "'Inter', system-ui, sans-serif",
     marginTop: 2,
   },
   candidateUrl: {
-    fontSize: 10,
+    fontSize: 11,
     color: "var(--muted-fg)",
-    fontFamily: "'JetBrains Mono', monospace",
-    marginTop: 6,
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 4,
+    marginTop: 4,
     textDecoration: "none",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  curationFooter: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 12,
-    marginTop: 24,
-    paddingTop: 20,
+
+  // Sticky bottom bar
+  bottomBar: {
+    position: "fixed",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    padding: "12px 16px calc(12px + env(safe-area-inset-bottom))",
+    background: "var(--bg)",
     borderTop: "1px solid var(--border)",
-    flexWrap: "wrap",
+    display: "flex",
+    gap: 8,
+    zIndex: 20,
+  },
+  bottomBarGhost: {
+    padding: "12px 16px",
+    fontSize: 13,
+    background: "transparent",
+    border: "1px solid var(--border)",
+    cursor: "pointer",
+    color: "var(--fg)",
+    fontWeight: 600,
+    letterSpacing: "0.04em",
+    textTransform: "uppercase",
+  },
+  bottomBarPrimary: {
+    flex: 1,
+    padding: "12px 16px",
+    fontSize: 13,
+    background: "var(--accent)",
+    color: "#fff",
+    border: "none",
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    fontWeight: 700,
+    letterSpacing: "0.04em",
+    textTransform: "uppercase",
   },
 
-  activeLocBar: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: 16,
-    padding: "18px 20px",
+  // Settings
+  settingsSection: {
+    marginBottom: 28,
+    padding: "16px",
     background: "var(--bg-elevated)",
     border: "1px solid var(--border)",
-    borderLeft: "3px solid var(--accent)",
-    flexWrap: "wrap",
   },
-  activeLocName: {
-    fontSize: 28,
-    fontWeight: 500,
+  settingsLabel: {
+    fontSize: 10,
+    letterSpacing: "0.16em",
+    textTransform: "uppercase",
+    color: "var(--muted-fg)",
+    fontWeight: 700,
+    marginBottom: 6,
+  },
+  settingsCity: {
+    fontSize: 22,
+    fontWeight: 600,
     letterSpacing: "-0.01em",
-    marginTop: 4,
+    fontFamily: "Georgia, serif",
   },
-  activeLocMeta: {
+  settingsMeta: {
     fontSize: 12,
     color: "var(--muted-fg)",
-    marginTop: 6,
-    fontFamily: "'Inter', system-ui, sans-serif",
+    marginTop: 4,
   },
-  linkBtn: {
-    background: "none",
-    border: "none",
-    color: "var(--accent)",
-    cursor: "pointer",
-    fontSize: 12,
-    padding: 0,
-    textDecoration: "underline",
+  settingsActions: {
+    display: "flex",
+    gap: 8,
+    marginTop: 14,
+    flexWrap: "wrap",
   },
-  ghostBtn: {
-    padding: "8px 12px",
+  settingsBtn: {
+    padding: "10px 14px",
     fontSize: 12,
     background: "transparent",
     border: "1px solid var(--border)",
@@ -1030,206 +1278,44 @@ const styles: Record<string, React.CSSProperties> = {
     display: "inline-flex",
     alignItems: "center",
     gap: 6,
-    fontFamily: "'Inter', system-ui, sans-serif",
     color: "var(--fg)",
+    fontWeight: 600,
     letterSpacing: "0.04em",
     textTransform: "uppercase",
   },
-  sourcesGrid: {
-    marginTop: 16,
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
-    gap: 10,
-  },
-  sourceCard: {
-    padding: "14px 16px",
-    background: "var(--bg-elevated)",
-    border: "1px solid var(--border)",
-    textDecoration: "none",
-    color: "var(--fg)",
+  sourcesList: {
     display: "flex",
     flexDirection: "column",
-    gap: 4,
+    gap: 6,
+    marginTop: 8,
   },
-  sourceType: {
-    fontSize: 9,
-    letterSpacing: "0.18em",
-    textTransform: "uppercase",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    fontWeight: 600,
-  },
-  sourceName: { fontSize: 15, fontWeight: 500, marginTop: 2 },
-  sourceFocus: {
-    fontSize: 12,
-    color: "var(--muted-fg)",
-    lineHeight: 1.4,
-    fontFamily: "'Inter', system-ui, sans-serif",
-  },
-  sourceUrl: {
-    fontSize: 11,
-    color: "var(--muted-fg)",
-    fontFamily: "'JetBrains Mono', monospace",
-    marginTop: 6,
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 4,
-  },
-
-  timeFilters: {
-    display: "flex",
-    gap: 8,
-    flexWrap: "wrap",
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  filterBtn: {
-    padding: "10px 16px",
-    fontSize: 14,
-    background: "transparent",
-    border: "1px solid var(--border)",
-    cursor: "pointer",
-    color: "var(--fg)",
-  },
-  filterBtnActive: { background: "var(--fg)", color: "var(--bg)", borderColor: "var(--fg)" },
-  dateInput: {
+  sourceListItem: {
     padding: "10px 12px",
-    fontSize: 14,
+    background: "var(--bg)",
     border: "1px solid var(--border)",
-    background: "var(--bg-elevated)",
+    textDecoration: "none",
     color: "var(--fg)",
-  },
-  searchBtn: {
-    padding: "16px 28px",
-    fontSize: 14,
-    fontWeight: 500,
-    background: "var(--accent)",
-    color: "#fff",
-    border: "none",
-    cursor: "pointer",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 10,
-    fontFamily: "'Inter', system-ui, sans-serif",
-    letterSpacing: "0.04em",
-    textTransform: "uppercase",
-  },
-
-  eventsGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
-    gap: 0,
-    borderTop: "1px solid var(--border)",
-    borderLeft: "1px solid var(--border)",
-  },
-  eventCard: {
-    padding: "20px 22px",
-    background: "var(--bg-elevated)",
-    borderRight: "1px solid var(--border)",
-    borderBottom: "1px solid var(--border)",
     display: "flex",
     flexDirection: "column",
-    gap: 10,
+    gap: 2,
   },
-  eventHeader: { display: "flex", justifyContent: "space-between", alignItems: "center" },
-  audienceBadge: {
-    fontSize: 10,
-    letterSpacing: "0.14em",
-    textTransform: "uppercase",
-    padding: "3px 8px",
-    border: "1px solid",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    fontWeight: 600,
-    display: "inline-flex",
-    gap: 5,
+  sourceListHeader: {
+    display: "flex",
+    justifyContent: "space-between",
     alignItems: "center",
+    gap: 8,
   },
-  eventIndex: {
-    fontSize: 11,
-    color: "var(--muted-fg)",
-    fontFamily: "'JetBrains Mono', monospace",
+  adapterBadge: {
+    fontSize: 9,
     letterSpacing: "0.1em",
-  },
-  eventTitle: {
-    fontSize: 20,
-    fontWeight: 500,
-    letterSpacing: "-0.01em",
-    lineHeight: 1.2,
-    margin: 0,
-    marginTop: 4,
-  },
-  eventMeta: { display: "flex", flexDirection: "column", gap: 4, marginTop: 4 },
-  metaRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    fontSize: 13,
-    color: "var(--fg)",
-    fontFamily: "'Inter', system-ui, sans-serif",
-  },
-  eventDesc: {
-    fontSize: 13,
-    color: "var(--muted-fg)",
-    lineHeight: 1.5,
-    margin: 0,
-    fontFamily: "'Inter', system-ui, sans-serif",
-    borderTop: "1px dashed var(--border)",
-    paddingTop: 10,
-    marginTop: 4,
-  },
-  audienceReason: {
-    fontSize: 11,
-    color: "var(--muted-fg)",
-    fontStyle: "italic",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    display: "inline-flex",
-    gap: 5,
-    alignItems: "center",
-  },
-  eventSource: {
-    fontSize: 11,
-    color: "var(--accent)",
-    textDecoration: "none",
-    marginTop: "auto",
-    paddingTop: 8,
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 5,
-    fontFamily: "'Inter', system-ui, sans-serif",
-    letterSpacing: "0.04em",
-  },
-  emptyHint: {
-    padding: "14px 18px",
-    background: "var(--bg-sunk)",
-    fontSize: 13,
-    color: "var(--muted-fg)",
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    fontFamily: "'Inter', system-ui, sans-serif",
-  },
-  welcome: { textAlign: "center", padding: "80px 20px", maxWidth: 560, margin: "0 auto" },
-  welcomeMark: { fontSize: 56, color: "var(--accent)", marginBottom: 16 },
-  welcomeTitle: {
-    fontSize: 40,
-    fontWeight: 500,
-    letterSpacing: "-0.02em",
-    margin: 0,
-    marginBottom: 16,
-  },
-  welcomeText: {
-    fontSize: 15,
-    color: "var(--muted-fg)",
-    lineHeight: 1.6,
-    fontFamily: "'Inter', system-ui, sans-serif",
-  },
-  footer: {
-    borderTop: "1px solid var(--border)",
-    padding: "20px 28px",
-    textAlign: "center",
-    fontSize: 11,
-    color: "var(--muted-fg)",
-    fontFamily: "'Inter', system-ui, sans-serif",
-    letterSpacing: "0.08em",
     textTransform: "uppercase",
+    padding: "2px 6px",
+    border: "1px solid",
+    fontWeight: 700,
+  },
+  sourceListName: { fontSize: 14, fontWeight: 600, marginTop: 2 },
+  sourceListUrl: {
+    fontSize: 11,
+    color: "var(--muted-fg)",
   },
 };

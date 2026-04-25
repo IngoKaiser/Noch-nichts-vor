@@ -16,6 +16,7 @@
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
 html,
@@ -24,17 +25,20 @@ body {
   padding: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family: "Fraunces", "Cormorant Garamond", Georgia, serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+button,
+input {
+  font-family: inherit;
 }
 
 button {
-  font-family: inherit;
-}
-
-input {
-  font-family: inherit;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 @keyframes spin {
@@ -56,4 +60,13 @@ input {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+.slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+
+/* Serif for the headline only */
+.serif {
+  font-family: Georgia, "Times New Roman", serif;
 }
