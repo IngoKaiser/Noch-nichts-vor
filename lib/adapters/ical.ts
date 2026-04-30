@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
 import ICAL from "ical.js";
 import type { RawEvent } from "../types";
-import { fetchText, fetchWithTimeout } from "./http";
+import { fetchText, fetchWithTimeout, absolutize } from "./http";
 
 /**
  * iCal/ICS feed adapter. Many city event calendars publish .ics feeds
@@ -15,7 +15,12 @@ export interface IcalProbeResult {
   note?: string;
 }
 
-const ICAL_HINTS = ["/feed.ical", "/calendar.ics", "/feed.ics", "/events.ics"];
+const ICAL_HINTS = [
+  "/feed.ical", "/calendar.ics", "/feed.ics", "/events.ics",
+  "/veranstaltungen.ics", "/termine.ics", "/kalender.ics",
+  "/events/feed.ics", "/veranstaltungen/feed.ics",
+  "/?type=ical", "/?format=ical", "/ical",
+];
 
 export async function probeIcal(url: string): Promise<IcalProbeResult> {
   // Strategy 1: try to find an .ics link inside the page HTML
@@ -96,13 +101,28 @@ function parseIcal(text: string, sourceName: string, sourceUrl: string): RawEven
       if (!start) continue;
       if (start < now || start > horizon) continue;
 
+      // Try to extract the event's own URL from the VEVENT.
+      // Falls back to the source listing URL only as last resort.
+      let eventUrl: string | undefined;
+      try {
+        const urlProp = vevent.getFirstPropertyValue("url");
+        if (urlProp) eventUrl = String(urlProp);
+      } catch {}
+      // Some calendars put the URL in DESCRIPTION instead
+      if (!eventUrl) {
+        const desc = event.description || "";
+        const m = desc.match(/https?:\/\/[^\s<>"'\]]+/);
+        if (m) eventUrl = m[0];
+      }
+
       out.push({
         title: event.summary || "Unbekannt",
         datetime: formatJsDate(start),
         location: event.location || "",
         description: trim(event.description || ""),
-        url: sourceUrl,
+        url: eventUrl,
         sourceName,
+        sourceListingUrl: sourceUrl,
       });
     } catch {
       continue;
@@ -114,14 +134,6 @@ function parseIcal(text: string, sourceName: string, sourceUrl: string): RawEven
 function formatJsDate(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function absolutize(href: string, base: string): string {
-  try {
-    return new URL(href, base).toString();
-  } catch {
-    return href;
-  }
 }
 
 function trim(s: string, max = 200): string {

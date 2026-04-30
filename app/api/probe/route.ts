@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { detectAdapter } from "@/lib/adapters";
+import { errorResponse } from "@/lib/errors";
 import type { EventSource } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -15,7 +16,10 @@ export async function POST(req: NextRequest) {
   try {
     const { sources } = await req.json();
     if (!Array.isArray(sources) || sources.length === 0) {
-      return NextResponse.json({ error: "Sources required" }, { status: 400 });
+      return NextResponse.json(
+        { error: { code: "no_sources", userMessage: "Keine Quellen zum Prüfen übergeben." } },
+        { status: 400 }
+      );
     }
 
     // Probe all sources in parallel — but with a per-source timeout via the adapter itself
@@ -41,6 +45,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ sources: results });
   } catch (e: any) {
     console.error("Probe error", e);
-    return NextResponse.json({ error: e?.message || "Probe failed" }, { status: 500 });
+    const { body, status } = errorResponse(e);
+    return NextResponse.json(body, { status });
   }
 }

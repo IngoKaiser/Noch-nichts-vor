@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
 import { XMLParser } from "fast-xml-parser";
 import type { RawEvent } from "../types";
-import { fetchText, fetchWithTimeout } from "./http";
+import { fetchText, fetchWithTimeout, absolutize } from "./http";
 
 /**
  * RSS/Atom feed adapter. MOPO, Hamburger Abendblatt, and many other
@@ -18,12 +18,10 @@ export interface RssProbeResult {
 }
 
 const RSS_HINTS = [
-  "/rss",
-  "/feed",
-  "/feed/rss",
-  "/feed.xml",
-  "/rss.xml",
-  "/atom.xml",
+  "/rss", "/feed", "/feed/rss", "/feed.xml", "/rss.xml", "/atom.xml",
+  "/events.rss", "/events/feed", "/veranstaltungen/feed",
+  "/termine/feed", "/?feed=rss", "/?feed=rss2",
+  "/feed/atom", "/atom",
 ];
 
 export async function probeRss(url: string): Promise<RssProbeResult> {
@@ -64,10 +62,11 @@ export async function probeRss(url: string): Promise<RssProbeResult> {
 
 export async function fetchRssEvents(
   endpoint: string,
-  sourceName: string
+  sourceName: string,
+  sourceListingUrl?: string
 ): Promise<RawEvent[]> {
   const xml = await fetchText(endpoint, 12_000);
-  return parseRss(xml, sourceName);
+  return parseRss(xml, sourceName, sourceListingUrl, endpoint);
 }
 
 async function tryFetchRss(
@@ -90,7 +89,12 @@ async function tryFetchRss(
   }
 }
 
-function parseRss(xml: string, sourceName: string): RawEvent[] {
+function parseRss(
+  xml: string,
+  sourceName: string,
+  sourceListingUrl?: string,
+  feedUrl?: string
+): RawEvent[] {
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: "@_",
@@ -105,6 +109,9 @@ function parseRss(xml: string, sourceName: string): RawEvent[] {
 
   const list = Array.isArray(items) ? items : [items];
 
+  // Use feedUrl as base for relative URLs, fall back to listing URL
+  const base = feedUrl || sourceListingUrl || "";
+
   const out: RawEvent[] = [];
   for (const item of list) {
     if (!item) continue;
@@ -117,8 +124,9 @@ function parseRss(xml: string, sourceName: string): RawEvent[] {
       title: stripHtml(title),
       datetime: normalizeRssDate(pubDate),
       description: trim(stripHtml(desc)),
-      url: link,
+      url: link ? absolutize(link, base) : undefined,
       sourceName,
+      sourceListingUrl,
     });
   }
 
@@ -145,14 +153,6 @@ function normalizeRssDate(s: string): string {
   if (isNaN(d.getTime())) return s;
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function absolutize(href: string, base: string): string {
-  try {
-    return new URL(href, base).toString();
-  } catch {
-    return href;
-  }
 }
 
 function trim(s: string, max = 200): string {

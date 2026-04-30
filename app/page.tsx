@@ -26,6 +26,8 @@ import type {
   Event,
   TimeFilter,
   SourceRecord,
+  Audience,
+  Category,
 } from "@/lib/types";
 
 const APP_NAME = "Noch nichts vor?";
@@ -42,10 +44,19 @@ export default function HomePage() {
   const [customDate, setCustomDate] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [statusMsg, setStatusMsg] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{
+    userMessage: string;
+    code?: string;
+    retryAfter?: number;
+  } | null>(null);
+  const [now, setNow] = useState(Date.now());
   const [candidateSources, setCandidateSources] = useState<CandidateSource[] | null>(null);
   const [curationLocation, setCurationLocation] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
+
+  // Display filters — operate on already-fetched events, no API call required
+  const [audienceFilter, setAudienceFilter] = useState<"all" | Audience>("all");
+  const [categoryFilter, setCategoryFilter] = useState<"all" | Category>("all");
 
   // Load active location on mount, auto-load today's events
   useEffect(() => {
@@ -59,10 +70,18 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Tick once per second when an error has a retryAfter timestamp,
+  // so the countdown updates live without manual refresh.
+  useEffect(() => {
+    if (!error?.retryAfter) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [error?.retryAfter]);
+
   async function discoverCandidates(loc: string): Promise<CandidateSource[]> {
     setPhase("discovering");
     setStatusMsg(`Identifiziere Quellen für ${loc}…`);
-    setError("");
+    setError(null);
     setCandidateSources(null);
 
     const res = await fetch("/api/discover", {
@@ -72,7 +91,7 @@ export default function HomePage() {
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `HTTP ${res.status}`);
+      throw makeApiError(data, res.status);
     }
     const data = await res.json();
     return data.sources as CandidateSource[];
@@ -86,7 +105,7 @@ export default function HomePage() {
   ) {
     setPhase("searching");
     setStatusMsg(`Suche Veranstaltungen…`);
-    setError("");
+    setError(null);
 
     try {
       const res = await fetch("/api/events", {
@@ -101,7 +120,7 @@ export default function HomePage() {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `HTTP ${res.status}`);
+        throw makeApiError(data, res.status);
       }
       const data = await res.json();
       setEvents(data.events as Event[]);
@@ -109,7 +128,7 @@ export default function HomePage() {
       setStatusMsg("");
     } catch (e: any) {
       console.error(e);
-      setError(e.message);
+      setError(extractErrorObj(e));
       setPhase("idle");
     }
   }
@@ -128,7 +147,7 @@ export default function HomePage() {
       setStatusMsg("");
     } catch (e: any) {
       console.error(e);
-      setError(e.message);
+      setError(extractErrorObj(e));
       setPhase("idle");
     }
   }
@@ -149,7 +168,7 @@ export default function HomePage() {
       setPhase("curating");
       setStatusMsg("");
     } catch (e: any) {
-      setError(e.message);
+      setError(extractErrorObj(e));
       setPhase("idle");
     }
   }
@@ -173,14 +192,14 @@ export default function HomePage() {
       .map(({ selected, recommended, ...rest }) => rest) as EventSource[];
 
     if (selected.length === 0) {
-      setError("Bitte mindestens eine Quelle auswählen.");
+      setError({ userMessage: "Bitte mindestens eine Quelle auswählen.", code: "no_sources" });
       return;
     }
 
     // Step 1: probe adapters for each source (parallel, server-side)
     setPhase("discovering");
     setStatusMsg("Prüfe Quellen auf direkte Datenfeeds…");
-    setError("");
+    setError(null);
 
     let probedSources: EventSource[] = selected;
     try {
@@ -210,7 +229,7 @@ export default function HomePage() {
     setCurationLocation(null);
     setPhase("idle");
     setStatusMsg("");
-    setError("");
+    setError(null);
     setEvents([]);
     setTimeFilter("today");
     await searchEventsInternal(record.location, probedSources, "today", "");
@@ -221,13 +240,13 @@ export default function HomePage() {
     setCurationLocation(null);
     setPhase("idle");
     setStatusMsg("");
-    setError("");
+    setError(null);
   }
 
   async function handleSearchEvents() {
     if (!activeRecord) return;
     if (timeFilter === "custom" && !customDate) {
-      setError("Bitte Datum wählen.");
+      setError({ userMessage: "Bitte Datum wählen.", code: "bad_request" });
       return;
     }
     await searchEventsInternal(
@@ -244,14 +263,40 @@ export default function HomePage() {
     setEvents([]);
     setLocationInput("");
     setView("main");
-    setError("");
+    setError(null);
   }
 
-  const audienceConfig: Record<string, { label: string; color: string; icon: string }> = {
+  const audienceConfig: Record<Audience, { label: string; color: string; icon: string }> = {
     family: { label: "Familie", color: "var(--accent-family)", icon: "♡" },
     adult: { label: "Erw.", color: "var(--accent-adult)", icon: "⬢" },
-    mixed: { label: "Gemischt", color: "var(--accent-mixed)", icon: "◇" },
-    unknown: { label: "Offen", color: "var(--muted-fg)", icon: "?" },
+  };
+
+  const categoryConfig: Record<Category, { label: string; icon: string }> = {
+    concert: { label: "Konzert", icon: "♪" },
+    stage: { label: "Bühne", icon: "✦" },
+    art: { label: "Kunst", icon: "◈" },
+    cinema: { label: "Kino", icon: "▶" },
+    market: { label: "Stadt & Markt", icon: "⊙" },
+    sport: { label: "Sport", icon: "◎" },
+    other: { label: "Sonstiges", icon: "·" },
+  };
+
+  // Apply display filters to fetched events
+  const filteredEvents = events.filter((ev) => {
+    if (audienceFilter !== "all" && ev.audience !== audienceFilter) return false;
+    if (categoryFilter !== "all" && ev.category !== categoryFilter) return false;
+    return true;
+  });
+
+  // Counts per category, used to show numbers in filter buttons
+  const categoryCounts: Record<string, number> = { all: events.length };
+  for (const ev of events) {
+    categoryCounts[ev.category] = (categoryCounts[ev.category] || 0) + 1;
+  }
+  const audienceCounts: Record<string, number> = {
+    all: events.length,
+    family: events.filter((e) => e.audience === "family").length,
+    adult: events.filter((e) => e.audience === "adult").length,
   };
 
   const typeLabel: Record<string, string> = {
@@ -392,7 +437,14 @@ export default function HomePage() {
           {error && (
             <div style={S.errorBar}>
               <AlertCircle size={14} />
-              <span>{error}</span>
+              <div style={{ flex: 1 }}>
+                <div>{error.userMessage}</div>
+                {error.retryAfter && (
+                  <div style={S.errorCountdown}>
+                    {formatCountdown(error.retryAfter, now)}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </main>
@@ -548,7 +600,14 @@ export default function HomePage() {
             {error && (
               <div style={S.errorBar}>
                 <AlertCircle size={14} />
-                <span>{error}</span>
+                <div style={{ flex: 1 }}>
+                  <div>{error.userMessage}</div>
+                  {error.retryAfter && (
+                    <div style={S.errorCountdown}>
+                      {formatCountdown(error.retryAfter, now)}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -643,11 +702,21 @@ export default function HomePage() {
         {error && (
           <div style={S.errorBar}>
             <AlertCircle size={14} />
-            <span>{error}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div>{error.userMessage}</div>
+              {error.retryAfter && (
+                <div style={S.errorCountdown}>
+                  {formatCountdown(error.retryAfter, now)}
+                </div>
+              )}
+            </div>
             <button
               onClick={handleSearchEvents}
               style={S.retryBtn}
-              disabled={isBusy}
+              disabled={
+                isBusy ||
+                (error.retryAfter !== undefined && error.retryAfter > now)
+              }
             >
               Erneut
             </button>
@@ -656,57 +725,151 @@ export default function HomePage() {
 
         {/* EVENTS */}
         {events.length > 0 && (
-          <div style={S.eventsList} className="slide-up">
-            {events.map((ev, i) => {
-              const aud = audienceConfig[ev.audience] || audienceConfig.unknown;
-              return (
-                <article key={i} style={S.eventCard}>
-                  <div style={S.eventHeader}>
-                    <div
+          <>
+            {/* Filter Bar — Audience */}
+            <div style={S.filterGroup}>
+              <div style={S.filterGroupLabel}>Für</div>
+              <div style={S.chipScroll}>
+                {(["all", "family", "adult"] as const).map((a) => {
+                  const cfg = a === "all" ? null : audienceConfig[a];
+                  const count = audienceCounts[a] || 0;
+                  const active = audienceFilter === a;
+                  return (
+                    <button
+                      key={a}
+                      onClick={() => setAudienceFilter(a)}
                       style={{
-                        ...S.audienceBadge,
-                        color: aud.color,
-                        borderColor: aud.color,
+                        ...S.chipFilter,
+                        ...(active ? S.chipFilterActive : {}),
                       }}
+                      disabled={count === 0 && a !== "all"}
                     >
-                      <span>{aud.icon}</span> {aud.label}
-                    </div>
-                    <div style={S.eventTime}>
-                      <Clock size={11} />
-                      {formatDateTime(ev.datetime)}
-                    </div>
-                  </div>
-                  <h3 style={S.eventTitle}>{ev.title}</h3>
-                  {ev.description && <p style={S.eventDesc}>{ev.description}</p>}
-                  <div style={S.eventMetaRow}>
-                    <div style={S.metaItem}>
-                      <MapPin size={12} />
-                      <span>{ev.location || "Ort offen"}</span>
-                    </div>
-                    <div style={S.metaItem}>
-                      <Euro size={12} />
-                      <span>{ev.cost || "?"}</span>
-                    </div>
-                  </div>
-                  {ev.audienceReason && (
-                    <div style={S.audienceReason}>
-                      <Users size={10} /> {ev.audienceReason}
-                    </div>
-                  )}
-                  {ev.sourceUrl && (
-                    <a
-                      href={ev.sourceUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={S.eventSource}
-                    >
-                      {ev.sourceName || "Quelle"} <ExternalLink size={10} />
-                    </a>
-                  )}
-                </article>
-              );
-            })}
-          </div>
+                      {cfg ? <span>{cfg.icon}</span> : null}
+                      {a === "all" ? "Alle" : cfg!.label}
+                      <span style={S.chipCount}>{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Filter Bar — Category */}
+            <div style={S.filterGroup}>
+              <div style={S.filterGroupLabel}>Art</div>
+              <div style={S.chipScroll}>
+                {(["all", "concert", "stage", "art", "cinema", "market", "sport", "other"] as const).map(
+                  (c) => {
+                    const cfg = c === "all" ? null : categoryConfig[c];
+                    const count = categoryCounts[c] || 0;
+                    const active = categoryFilter === c;
+                    return (
+                      <button
+                        key={c}
+                        onClick={() => setCategoryFilter(c)}
+                        style={{
+                          ...S.chipFilter,
+                          ...(active ? S.chipFilterActive : {}),
+                        }}
+                        disabled={count === 0 && c !== "all"}
+                      >
+                        {cfg ? <span>{cfg.icon}</span> : null}
+                        {c === "all" ? "Alle" : cfg!.label}
+                        <span style={S.chipCount}>{count}</span>
+                      </button>
+                    );
+                  }
+                )}
+              </div>
+            </div>
+
+            {/* Result count */}
+            <div style={S.resultCount}>
+              {filteredEvents.length === events.length
+                ? `${events.length} Veranstaltung${events.length === 1 ? "" : "en"}`
+                : `${filteredEvents.length} von ${events.length} angezeigt`}
+            </div>
+
+            {filteredEvents.length === 0 ? (
+              <div style={S.emptyResults}>
+                Keine Treffer mit diesen Filtern.{" "}
+                <button
+                  onClick={() => {
+                    setAudienceFilter("all");
+                    setCategoryFilter("all");
+                  }}
+                  style={S.linkBtn}
+                >
+                  Filter zurücksetzen
+                </button>
+              </div>
+            ) : (
+              <div style={S.eventsList} className="slide-up">
+                {filteredEvents.map((ev, i) => {
+                  const aud = audienceConfig[ev.audience];
+                  const cat = categoryConfig[ev.category];
+                  return (
+                    <article key={i} style={S.eventCard}>
+                      <div style={S.eventHeader}>
+                        <div style={S.badgeRow}>
+                          <div
+                            style={{
+                              ...S.audienceBadge,
+                              color: aud.color,
+                              borderColor: aud.color,
+                            }}
+                          >
+                            <span>{aud.icon}</span> {aud.label}
+                          </div>
+                          {cat && (
+                            <div style={S.categoryBadge}>
+                              <span>{cat.icon}</span> {cat.label}
+                            </div>
+                          )}
+                        </div>
+                        <div style={S.eventTime}>
+                          <Clock size={11} />
+                          {formatDateTime(ev.datetime)}
+                        </div>
+                      </div>
+                      <h3 style={S.eventTitle}>{ev.title}</h3>
+                      {ev.description && <p style={S.eventDesc}>{ev.description}</p>}
+                      {(ev.location || ev.cost) && (
+                        <div style={S.eventMetaRow}>
+                          {ev.location && (
+                            <div style={S.metaItem}>
+                              <MapPin size={12} />
+                              <span>{ev.location}</span>
+                            </div>
+                          )}
+                          {ev.cost && (
+                            <div style={S.metaItem}>
+                              <Euro size={12} />
+                              <span>{ev.cost}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {ev.audienceReason && (
+                        <div style={S.audienceReason}>
+                          <Users size={10} /> {ev.audienceReason}
+                        </div>
+                      )}
+                      {ev.sourceUrl && (
+                        <a
+                          href={ev.sourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={S.eventSource}
+                        >
+                          {ev.sourceName || "Quelle"} <ExternalLink size={10} />
+                        </a>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
 
         {!isBusy && events.length === 0 && !error && (
@@ -725,6 +888,44 @@ function hostname(url: string): string {
   } catch {
     return url;
   }
+}
+
+/**
+ * Construct a structured error from a JSON response body.
+ * Server returns { error: { code, userMessage, retryAfter? } } as our envelope.
+ */
+function makeApiError(data: any, status: number): Error {
+  const err: any = new Error(
+    data?.error?.userMessage || data?.error || `HTTP ${status}`
+  );
+  err.appError = data?.error || { userMessage: `HTTP ${status}` };
+  return err;
+}
+
+/**
+ * Pull the structured error info off a thrown error, if present.
+ * Falls back to a plain message when missing.
+ */
+function extractErrorObj(e: any): { userMessage: string; code?: string; retryAfter?: number } {
+  if (e?.appError && typeof e.appError === "object") {
+    return e.appError;
+  }
+  return { userMessage: e?.message || "Unbekannter Fehler" };
+}
+
+/**
+ * Format a remaining-time countdown like "in 23 Sek." or "in 2 Min."
+ */
+function formatCountdown(retryAt: number, now: number): string {
+  const ms = retryAt - now;
+  if (ms <= 0) return "jetzt verfügbar";
+  const sec = Math.ceil(ms / 1000);
+  if (sec < 60) return `in ${sec} Sek.`;
+  const min = Math.ceil(sec / 60);
+  if (min < 60) return `in ${min} Min.`;
+  const hours = Math.floor(min / 60);
+  const remMin = min % 60;
+  return `in ${hours} Std. ${remMin} Min.`;
 }
 
 function formatDateTime(s: string): string {
@@ -930,6 +1131,95 @@ const S: Record<string, React.CSSProperties> = {
     color: "var(--bg)",
     borderColor: "var(--fg)",
   },
+
+  // Display filters (audience + category) — applied client-side
+  filterGroup: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 8,
+  },
+  chipScroll: {
+    display: "flex",
+    gap: 6,
+    overflowX: "auto",
+    WebkitOverflowScrolling: "touch",
+    paddingBottom: 4,
+    scrollbarWidth: "none",
+    flex: 1,
+  },
+  filterGroupLabel: {
+    fontSize: 10,
+    letterSpacing: "0.16em",
+    textTransform: "uppercase",
+    color: "var(--muted-fg)",
+    fontWeight: 700,
+    minWidth: 28,
+    flexShrink: 0,
+  },
+  chipFilter: {
+    padding: "6px 10px",
+    fontSize: 12,
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border)",
+    cursor: "pointer",
+    color: "var(--fg)",
+    whiteSpace: "nowrap",
+    flexShrink: 0,
+    fontWeight: 500,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+    borderRadius: 999,
+  },
+  chipFilterActive: {
+    background: "var(--fg)",
+    color: "var(--bg)",
+    borderColor: "var(--fg)",
+  },
+  chipCount: {
+    fontSize: 10,
+    opacity: 0.65,
+    fontWeight: 600,
+    marginLeft: 2,
+  },
+  resultCount: {
+    fontSize: 11,
+    color: "var(--muted-fg)",
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    margin: "12px 0 10px",
+    fontWeight: 600,
+  },
+  badgeRow: {
+    display: "inline-flex",
+    gap: 6,
+    alignItems: "center",
+    flexWrap: "wrap",
+  },
+  categoryBadge: {
+    fontSize: 9,
+    letterSpacing: "0.12em",
+    textTransform: "uppercase",
+    padding: "2px 7px",
+    border: "1px solid var(--border)",
+    background: "var(--bg-sunk)",
+    color: "var(--muted-fg)",
+    fontWeight: 700,
+    display: "inline-flex",
+    gap: 4,
+    alignItems: "center",
+  },
+  linkBtn: {
+    background: "none",
+    border: "none",
+    color: "var(--accent)",
+    cursor: "pointer",
+    textDecoration: "underline",
+    fontSize: "inherit",
+    padding: 0,
+    fontFamily: "inherit",
+  },
   customDateRow: {
     display: "flex",
     gap: 8,
@@ -975,25 +1265,34 @@ const S: Record<string, React.CSSProperties> = {
     background: "#fef2f0",
     border: "1px solid var(--accent)",
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 10,
     marginBottom: 16,
     fontSize: 13,
     color: "var(--accent-dark)",
     borderRadius: 4,
-    flexWrap: "wrap",
+    lineHeight: 1.4,
+  },
+  errorCountdown: {
+    fontSize: 11,
+    color: "var(--accent-dark)",
+    opacity: 0.8,
+    marginTop: 4,
+    fontWeight: 600,
+    letterSpacing: "0.04em",
   },
   retryBtn: {
-    marginLeft: "auto",
-    padding: "4px 10px",
+    flexShrink: 0,
+    padding: "6px 12px",
     fontSize: 11,
     background: "var(--accent)",
     color: "#fff",
     border: "none",
     cursor: "pointer",
-    fontWeight: 600,
+    fontWeight: 700,
     letterSpacing: "0.04em",
     textTransform: "uppercase",
+    alignSelf: "center",
   },
 
   // Events

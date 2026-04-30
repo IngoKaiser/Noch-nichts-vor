@@ -38,3 +38,16 @@ export async function fetchText(url: string, timeoutMs = 10_000): Promise<string
   }
   return await res.text();
 }
+
+/**
+ * Resolve a possibly-relative href against a base URL.
+ * Returns the absolute URL on success, or the original href on failure.
+ */
+export function absolutize(href: string, base: string): string {
+  if (!href) return href;
+  try {
+    return new URL(href, base).toString();
+  } catch {
+    return href;
+  }
+}

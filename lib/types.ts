@@ -6,30 +6,31 @@ export type SourceType =
   | "tourism"
   | "commercial";
 
-export type Audience = "family" | "adult" | "mixed" | "unknown" | "general";
+/**
+ * Reduced to two definitive values. Anything not clearly child-friendly
+ * defaults to "adult" — the safer assumption for parents using the app.
+ */
+export type Audience = "family" | "adult";
+
+/**
+ * Coarse content categories used as a top-level filter.
+ * - "concert": live music of any genre, DJ sets, festivals
+ * - "stage": theater, comedy, cabaret, readings, opera, dance
+ * - "art": exhibitions, museums, galleries, vernissages
+ * - "cinema": film screenings, open-air cinema, film festivals
+ * - "market": city festivals, flea markets, food markets, city tours
+ * - "sport": competitions, races, public sports events to watch
+ * - "other": workshops, lectures, parties, anything else
+ */
+export type Category = "concert" | "stage" | "art" | "cinema" | "market" | "sport" | "other";
 
 export type AdapterKind = "jsonld" | "ical" | "rss" | "html" | "websearch";
 
 export interface AdapterInfo {
   kind: AdapterKind;
-  /**
-   * For ical/rss: the actual feed URL (may differ from the source URL).
-   * For html: optionally a selector hint.
-   * For jsonld: not required (extracted from page).
-   * For websearch: not used.
-   */
   endpoint?: string;
-  /**
-   * When the adapter probe was performed.
-   */
   probedAt: string;
-  /**
-   * Whether the last probe found events successfully.
-   */
   ok: boolean;
-  /**
-   * Optional note about the probe (e.g., error reason).
-   */
   note?: string;
 }
 
@@ -38,7 +39,7 @@ export interface EventSource {
   url: string;
   type: SourceType;
   focus: string;
-  audience: Audience;
+  audience: Audience | "general" | "mixed";
   adapter?: AdapterInfo;
 }
 
@@ -60,15 +61,17 @@ export interface Event {
   description: string;
   cost: string;
   audience: Audience;
+  category: Category;
   audienceReason: string;
   sourceName: string;
+  /** Direct link to the event detail page on the source site. */
   sourceUrl: string;
 }
 
 export type TimeFilter = "today" | "tonight" | "weekend" | "custom";
 
 /**
- * Raw event scraped from a source — before audience classification.
+ * Raw event scraped from a source — before audience classification & enrichment.
  */
 export interface RawEvent {
   title: string;
@@ -76,6 +79,9 @@ export interface RawEvent {
   location?: string;
   description?: string;
   cost?: string;
+  /** Direct link to the event detail page (NOT the source listing page). */
   url?: string;
   sourceName: string;
+  /** The listing page URL — used as fallback if no detail link is available. */
+  sourceListingUrl?: string;
 }

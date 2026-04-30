@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
 import type { RawEvent } from "../types";
-import { fetchText } from "./http";
+import { fetchText, absolutize } from "./http";
 
 /**
  * Extracts schema.org Event objects from a page's <script type="application/ld+json">
@@ -14,16 +14,37 @@ export interface JsonLdProbeResult {
   note?: string;
 }
 
+const JSONLD_PATH_HINTS = [
+  "", // the source URL itself
+  "/veranstaltungen", "/termine", "/events", "/kalender",
+  "/programm", "/spielplan",
+];
+
 export async function probeJsonLd(url: string): Promise<JsonLdProbeResult> {
-  try {
-    const html = await fetchText(url, 8000);
-    const events = extractJsonLdEvents(html);
-    if (events.length === 0) {
-      return { ok: false, count: 0, note: "No JSON-LD events found" };
+  // Try the source URL first (most likely), then common event sub-paths
+  for (const hint of JSONLD_PATH_HINTS) {
+    const target = hint ? absolutizePath(url, hint) : url;
+    try {
+      const html = await fetchText(target, 8000);
+      const events = extractJsonLdEvents(html);
+      if (events.length > 0) {
+        return { ok: true, count: events.length, note: hint ? `via ${hint}` : undefined };
+      }
+    } catch {
+      continue;
     }
-    return { ok: true, count: events.length };
-  } catch (e: any) {
-    return { ok: false, count: 0, note: e?.message || "fetch failed" };
+  }
+  return { ok: false, count: 0, note: "No JSON-LD events found on common paths" };
+}
+
+function absolutizePath(baseUrl: string, path: string): string {
+  try {
+    const u = new URL(baseUrl);
+    u.pathname = path;
+    u.search = "";
+    return u.toString();
+  } catch {
+    return baseUrl;
   }
 }
 
@@ -39,8 +60,10 @@ export async function fetchJsonLdEvents(
     location: extractLocation(e.location),
     description: trim(e.description),
     cost: extractOffers(e.offers),
-    url: e.url || url,
+    // Prefer the event's own URL; fall back to listing URL only when missing
+    url: e.url ? absolutize(e.url, url) : undefined,
     sourceName,
+    sourceListingUrl: url,
   }));
 }
 

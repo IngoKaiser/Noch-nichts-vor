@@ -4,8 +4,8 @@ import {
   extractTextFromResponse,
   extractJson,
   createWithRetry,
-  friendlyError,
 } from "@/lib/anthropic";
+import { errorResponse } from "@/lib/errors";
 import type { CandidateSource } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -20,7 +20,10 @@ export async function POST(req: NextRequest) {
   try {
     const { location } = await req.json();
     if (!location || typeof location !== "string") {
-      return NextResponse.json({ error: "Location required" }, { status: 400 });
+      return NextResponse.json(
+        { error: { code: "bad_request", userMessage: "Bitte einen Ort angeben." } },
+        { status: 400 }
+      );
     }
 
     const prompt = buildDiscoveryPrompt(location);
@@ -56,10 +59,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ sources: deduped });
   } catch (e: any) {
     console.error("Discovery error", e);
-    return NextResponse.json(
-      { error: friendlyError(e) },
-      { status: e?.status || 500 }
-    );
+    const { body, status } = errorResponse(e);
+    return NextResponse.json(body, { status });
   }
 }
 

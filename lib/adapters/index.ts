@@ -10,39 +10,71 @@ import { probeHtml, fetchHtmlEvents } from "./html";
  *
  * Called once per source when sources are confirmed (after curation).
  */
+/**
+ * Detect the best adapter for a source. Probes are run in parallel for speed,
+ * then we pick the best result in priority order:
+ * JSON-LD → iCal → RSS → HTML scraping.
+ *
+ * Called once per source when sources are confirmed (after curation).
+ */
 export async function detectAdapter(url: string): Promise<AdapterInfo> {
   const probedAt = new Date().toISOString();
 
+  // Run all four probes in parallel to keep total probe time bounded.
+  // Each individual probe has its own timeout via fetchText.
+  const [jsonldResult, icalResult, rssResult, htmlResult] = await Promise.allSettled([
+    probeJsonLd(url),
+    probeIcal(url),
+    probeRss(url),
+    probeHtml(url),
+  ]);
+
   // 1. JSON-LD — best signal, structured by the site itself
-  try {
-    const r = await probeJsonLd(url);
-    if (r.ok) return { kind: "jsonld", probedAt, ok: true, note: `${r.count} events` };
-  } catch {}
+  if (jsonldResult.status === "fulfilled" && jsonldResult.value.ok) {
+    return {
+      kind: "jsonld",
+      probedAt,
+      ok: true,
+      note: `${jsonldResult.value.count} events${jsonldResult.value.note ? ` (${jsonldResult.value.note})` : ""}`,
+    };
+  }
 
   // 2. iCal — explicit calendar feed
-  try {
-    const r = await probeIcal(url);
-    if (r.ok && r.endpoint) {
-      return { kind: "ical", endpoint: r.endpoint, probedAt, ok: true, note: `${r.count} events` };
-    }
-  } catch {}
+  if (icalResult.status === "fulfilled" && icalResult.value.ok && icalResult.value.endpoint) {
+    return {
+      kind: "ical",
+      endpoint: icalResult.value.endpoint,
+      probedAt,
+      ok: true,
+      note: `${icalResult.value.count} events`,
+    };
+  }
 
   // 3. RSS — newsfeed, may include events
-  try {
-    const r = await probeRss(url);
-    if (r.ok && r.endpoint) {
-      return { kind: "rss", endpoint: r.endpoint, probedAt, ok: true, note: `${r.count} items` };
-    }
-  } catch {}
-
-  // 4. HTML — generic fallback
-  try {
-    const r = await probeHtml(url);
-    if (r.ok) return { kind: "html", probedAt, ok: true };
-    return { kind: "html", probedAt, ok: false, note: r.note };
-  } catch (e: any) {
-    return { kind: "html", probedAt, ok: false, note: e?.message };
+  if (rssResult.status === "fulfilled" && rssResult.value.ok && rssResult.value.endpoint) {
+    return {
+      kind: "rss",
+      endpoint: rssResult.value.endpoint,
+      probedAt,
+      ok: true,
+      note: `${rssResult.value.count} items`,
+    };
   }
+
+  // 4. HTML — generic fallback (always tries, since we can usually fetch a page)
+  if (htmlResult.status === "fulfilled") {
+    if (htmlResult.value.ok) {
+      return { kind: "html", probedAt, ok: true };
+    }
+    return { kind: "html", probedAt, ok: false, note: htmlResult.value.note };
+  }
+
+  return {
+    kind: "html",
+    probedAt,
+    ok: false,
+    note: htmlResult.status === "rejected" ? String(htmlResult.reason?.message || htmlResult.reason) : "all probes failed",
+  };
 }
 
 /**
@@ -67,7 +99,7 @@ export async function fetchSourceEvents(
       return await fetchIcalEvents(adapter.endpoint, source.name);
     case "rss":
       if (!adapter.endpoint) return [];
-      return await fetchRssEvents(adapter.endpoint, source.name);
+      return await fetchRssEvents(adapter.endpoint, source.name, source.url);
     case "html":
       return await fetchHtmlEvents(source.url, source.name, context);
     case "websearch":
