@@ -1,4 +1,4 @@
-import type { Event, TimeFilter } from "./types";
+import type { Event, TimeFilter, RawEvent } from "./types";
 
 /**
  * Compute the date range for a given filter.
@@ -25,13 +25,21 @@ export function computeDateRange(
 
   if (filter === "weekend") {
     const day = now.getDay(); // 0 So, 6 Sa
-    const daysToSat = (6 - day + 7) % 7;
-    const sat = new Date(startOfDay);
-    sat.setDate(now.getDate() + daysToSat);
-    const sunEnd = new Date(sat);
-    sunEnd.setDate(sat.getDate() + 1);
-    sunEnd.setHours(23, 59, 59, 999);
-    return { from: sat, to: sunEnd, label: "Wochenende" };
+    // If it's already weekend, use today + tomorrow if Saturday, or just today if Sunday
+    let satOffset: number;
+    if (day === 6) {
+      satOffset = 0; // today is Saturday
+    } else if (day === 0) {
+      satOffset = -1; // today is Sunday — show today only (yesterday was Sat)
+    } else {
+      satOffset = 6 - day; // upcoming Saturday
+    }
+    const start = new Date(startOfDay);
+    start.setDate(now.getDate() + satOffset);
+    const end = new Date(start);
+    end.setDate(start.getDate() + (day === 0 ? 0 : 1)); // Sat..Sun, or Sun-only
+    end.setHours(23, 59, 59, 999);
+    return { from: start, to: end, label: "Wochenende" };
   }
 
   if (filter === "custom" && customDate) {
@@ -46,34 +54,77 @@ export function computeDateRange(
 }
 
 /**
- * Filter events to those whose datetime falls within the given range.
- * Events with unparseable datetimes are kept (we'd rather show too many than too few).
+ * Strict filtering: events MUST have a parseable date that falls within the range.
+ * Events without a parseable date are DROPPED (they can't be confirmed to match).
+ *
+ * Exception: when filter is "today", keep undated events — they MIGHT be ongoing.
  */
 export function filterEventsByRange(
   events: Event[],
   from: Date,
-  to: Date
+  to: Date,
+  isTodayFilter = false
 ): Event[] {
   return events.filter((e) => {
     const d = parseEventDate(e.datetime);
-    if (!d) return true; // keep events with unknown date
+    if (!d) return isTodayFilter; // only keep undated events for "today"
     return d >= from && d <= to;
   });
 }
 
-function parseEventDate(s: string): Date | null {
+/**
+ * Same strict rule for RawEvent (pre-classification filter).
+ */
+export function filterRawEventsByRange(
+  events: RawEvent[],
+  from: Date,
+  to: Date,
+  isTodayFilter = false
+): RawEvent[] {
+  return events.filter((e) => {
+    const d = parseEventDate(e.datetime);
+    if (!d) return isTodayFilter;
+    return d >= from && d <= to;
+  });
+}
+
+/**
+ * Robust date parsing — handles multiple common formats:
+ * - "2026-05-03 19:30" or "2026-05-03T19:30:00"
+ * - "2026-05-03"
+ * - German "03.05.2026" or "03.05.2026 19:30"
+ */
+export function parseEventDate(s: string): Date | null {
   if (!s) return null;
-  // Match "YYYY-MM-DD HH:MM" or "YYYY-MM-DD"
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/);
-  if (!m) return null;
-  const d = new Date(
-    parseInt(m[1]),
-    parseInt(m[2]) - 1,
-    parseInt(m[3]),
-    m[4] ? parseInt(m[4]) : 0,
-    m[5] ? parseInt(m[5]) : 0
-  );
-  return isNaN(d.getTime()) ? null : d;
+  const trimmed = s.trim();
+
+  // ISO-like
+  const iso = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/);
+  if (iso) {
+    const d = new Date(
+      parseInt(iso[1]),
+      parseInt(iso[2]) - 1,
+      parseInt(iso[3]),
+      iso[4] ? parseInt(iso[4]) : 0,
+      iso[5] ? parseInt(iso[5]) : 0
+    );
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // German DD.MM.YYYY [HH:MM]
+  const de = trimmed.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[ ,](\d{1,2}):(\d{2}))?/);
+  if (de) {
+    const d = new Date(
+      parseInt(de[3]),
+      parseInt(de[2]) - 1,
+      parseInt(de[1]),
+      de[4] ? parseInt(de[4]) : 0,
+      de[5] ? parseInt(de[5]) : 0
+    );
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
 }
 
 /**
@@ -91,20 +142,133 @@ export function sortEvents(events: Event[]): Event[] {
 }
 
 /**
- * Deduplicate events by normalized (title, datetime) pair.
- * Same event reported by multiple sources gets merged into one.
+ * Aggressive deduplication.
+ *
+ * Two events are considered duplicates if:
+ * - Same normalized title (Unicode-normalized, lowercased, punctuation stripped, whitespace collapsed)
+ * - Same day (year-month-day, time ignored)
+ *
+ * When duplicates are found, the winner is the one with the most complete info:
+ * - has event-specific URL > no URL
+ * - has location > no location
+ * - has cost > no cost
+ * - longer description
+ * - source adapter "jsonld" > "ical" > "rss" > "html"
  */
 export function dedupeEvents(events: Event[]): Event[] {
   const seen = new Map<string, Event>();
   for (const ev of events) {
-    const key = `${normalize(ev.title)}|${ev.datetime || ""}`;
-    if (!seen.has(key)) {
+    const key = `${normalize(ev.title)}|${dayOf(ev.datetime)}`;
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, ev);
+    } else if (scoreEvent(ev) > scoreEvent(existing)) {
       seen.set(key, ev);
     }
   }
   return Array.from(seen.values());
 }
 
+/**
+ * Same for raw events.
+ */
+export function dedupeRawEvents(events: RawEvent[]): RawEvent[] {
+  const seen = new Map<string, RawEvent>();
+  for (const e of events) {
+    const key = `${normalize(e.title)}|${dayOf(e.datetime)}`;
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, e);
+    } else if (scoreRawEvent(e) > scoreRawEvent(existing)) {
+      seen.set(key, e);
+    }
+  }
+  return Array.from(seen.values());
+}
+
+function scoreEvent(e: Event): number {
+  return (
+    (e.sourceUrl && !e.sourceUrl.endsWith("/") ? 50 : 0) +
+    (e.location ? 30 : 0) +
+    (e.cost ? 20 : 0) +
+    Math.min(e.description?.length || 0, 200) / 4
+  );
+}
+
+function scoreRawEvent(e: RawEvent): number {
+  return (
+    (e.url ? 50 : 0) +
+    (e.location ? 30 : 0) +
+    (e.cost ? 20 : 0) +
+    Math.min(e.description?.length || 0, 200) / 4
+  );
+}
+
+/**
+ * Normalize title for dedup comparison:
+ * - lowercase
+ * - normalize Unicode (NFKC) so umlauts/diacritics are stable
+ * - replace umlauts with ASCII equivalents
+ * - strip punctuation and special characters
+ * - collapse whitespace
+ */
 function normalize(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
+  return s
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/ß/g, "ss")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Extract just the day portion (YYYY-MM-DD) from a datetime string.
+ * Tries multiple formats. Returns empty string if no day can be extracted.
+ */
+function dayOf(s: string): string {
+  if (!s) return "";
+  const d = parseEventDate(s);
+  if (!d) return "";
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Cap the event list to a reasonable size — too many events overwhelm the user.
+ * Tries to keep diversity across sources by interleaving them.
+ */
+export function capEvents(events: Event[], max: number): Event[] {
+  if (events.length <= max) return events;
+
+  // Group by source, interleave taking one per source per pass
+  const bySource = new Map<string, Event[]>();
+  for (const e of events) {
+    const list = bySource.get(e.sourceName) || [];
+    list.push(e);
+    bySource.set(e.sourceName, list);
+  }
+
+  const sourceLists = Array.from(bySource.values());
+  const result: Event[] = [];
+  let idx = 0;
+  while (result.length < max) {
+    let added = false;
+    for (const list of sourceLists) {
+      if (idx < list.length && result.length < max) {
+        result.push(list[idx]);
+        added = true;
+      }
+    }
+    if (!added) break;
+    idx++;
+  }
+
+  // Re-sort chronologically since interleave broke order
+  return sortEvents(result);
 }

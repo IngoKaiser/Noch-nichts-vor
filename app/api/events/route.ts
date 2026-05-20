@@ -4,9 +4,12 @@ import { classifyEvents } from "@/lib/classify";
 import { cacheGet, cacheSet, cacheMaybeCleanup } from "@/lib/cache";
 import {
   computeDateRange,
+  filterRawEventsByRange,
   filterEventsByRange,
   sortEvents,
+  dedupeRawEvents,
   dedupeEvents,
+  capEvents,
 } from "@/lib/timefilter";
 import { errorResponse } from "@/lib/errors";
 import type { Event, EventSource, RawEvent, TimeFilter } from "@/lib/types";
@@ -14,13 +17,9 @@ import type { Event, EventSource, RawEvent, TimeFilter } from "@/lib/types";
 export const runtime = "nodejs";
 export const maxDuration = 90;
 
-// Per-source cache TTL (raw events, before classification & filtering).
-// Switching the time filter (today → weekend) reuses these without refetching.
 const RAW_TTL_SECONDS = 2 * 60 * 60; // 2 hours
-
-// Per-query cache TTL (classified, filtered events).
-// Hit when same user reloads or comes back within window.
 const CLASSIFIED_TTL_SECONDS = 30 * 60; // 30 minutes
+const MAX_EVENTS = 80; // hard cap displayed to user
 
 interface SourceStatus {
   name: string;
@@ -30,21 +29,6 @@ interface SourceStatus {
   note?: string;
 }
 
-/**
- * Pipeline:
- *
- * 1. Try classified-events cache first → instant return on hit
- * 2. For each source:
- *    a. Try raw-events cache (per source URL × adapter kind)
- *    b. On miss: fetch via adapter (JSON-LD / iCal / RSS / HTML+Haiku)
- *    c. Cache raw events for RAW_TTL
- * 3. Merge raw events, dedupe, filter to requested date range
- * 4. Classify audience + category in ONE Haiku call (only on cache miss)
- * 5. Cache classified result for CLASSIFIED_TTL
- *
- * Result: when user toggles Heute → Wochenende, only the filter step re-runs.
- * No source refetch, no LLM call. Most expensive thing skipped.
- */
 export async function POST(req: NextRequest) {
   cacheMaybeCleanup();
 
@@ -58,7 +42,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Classified cache check
+    const isTodayFilter = timeFilter === "today" || timeFilter === "tonight";
+
+    // Classified cache check
     const classifiedKey = `events:classified:${location.toLowerCase()}:${timeFilter}:${customDate || ""}`;
     const classifiedHit = cacheGet<{ events: Event[]; meta: any }>(classifiedKey);
     if (classifiedHit) {
@@ -74,7 +60,7 @@ export async function POST(req: NextRequest) {
       .toISOString()
       .slice(0, 10)}`;
 
-    // 2. Per-source raw-events fetch with cache
+    // Per-source raw-events fetch with cache
     const sourceStatus: SourceStatus[] = [];
     const allRaw: RawEvent[] = [];
 
@@ -90,7 +76,6 @@ export async function POST(req: NextRequest) {
           location,
           dateRange: dateRangeStr,
         });
-        // Cache raw events even if empty — avoids hammering broken sources
         cacheSet(rawKey, events, RAW_TTL_SECONDS);
         return { source, events, fromCache: false };
       })
@@ -120,91 +105,53 @@ export async function POST(req: NextRequest) {
       const meta = {
         sourceStatus,
         rawCount: 0,
+        classifiedCount: 0,
         filteredCount: 0,
         fromCache: false,
       };
-      // Cache empty results briefly so we don't hammer broken sources
       cacheSet(classifiedKey, { events: [], meta }, 5 * 60);
       return NextResponse.json({ events: [], meta });
     }
 
-    // 3. Pre-filter to date range BEFORE classification — saves Haiku tokens
-    // (we don't need to classify events outside the requested window)
+    // STRICT pre-filter to date range BEFORE classification.
+    // Events without a parseable date are DROPPED unless filter is "today" or "tonight".
+    // This is the fix for "297 events for weekend" — most of those had no parseable date
+    // and were being kept under the old loose rule.
     const dedupedRaw = dedupeRawEvents(allRaw);
-    const inRange = filterRawByRange(dedupedRaw, range.from, range.to);
+    const inRange = filterRawEventsByRange(dedupedRaw, range.from, range.to, isTodayFilter);
 
-    // 4. Classify only events that survived the pre-filter
+    // Classify only events in range (saves Haiku tokens)
     const classified = await classifyEvents(inRange);
-    const sorted = sortEvents(dedupeEvents(classified));
+
+    // Strict filter AGAIN after classification (Haiku might have normalized dates).
+    // Same isTodayFilter rule applies.
+    const filtered = filterEventsByRange(classified, range.from, range.to, isTodayFilter);
+
+    // Dedupe, sort, cap
+    const deduped = dedupeEvents(filtered);
+    const sorted = sortEvents(deduped);
+    const capped = capEvents(sorted, MAX_EVENTS);
 
     const meta = {
       sourceStatus,
       rawCount: allRaw.length,
-      filteredCount: sorted.length,
+      dedupedCount: dedupedRaw.length,
+      inRangeCount: inRange.length,
+      classifiedCount: classified.length,
+      filteredCount: filtered.length,
+      finalCount: capped.length,
+      cappedFrom: sorted.length > MAX_EVENTS ? sorted.length : undefined,
       fromCache: false,
     };
 
-    cacheSet(classifiedKey, { events: sorted, meta }, CLASSIFIED_TTL_SECONDS);
+    cacheSet(classifiedKey, { events: capped, meta }, CLASSIFIED_TTL_SECONDS);
 
-    return NextResponse.json({ events: sorted, meta });
+    return NextResponse.json({ events: capped, meta });
   } catch (e: any) {
     console.error("Events error", e);
     const { body, status } = errorResponse(e);
     return NextResponse.json(body, { status });
   }
-}
-
-/**
- * Pre-filter raw events to the requested date range.
- * Events without a parseable date are kept (could be ongoing/all-day).
- */
-function filterRawByRange(events: RawEvent[], from: Date, to: Date): RawEvent[] {
-  return events.filter((e) => {
-    if (!e.datetime) return true;
-    const d = parseRawDate(e.datetime);
-    if (!d) return true;
-    return d >= from && d <= to;
-  });
-}
-
-function parseRawDate(s: string): Date | null {
-  if (!s) return null;
-  // Try ISO-like "2026-04-30 19:30"
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/);
-  if (m) {
-    const d = new Date(
-      `${m[1]}-${m[2]}-${m[3]}T${m[4] || "00"}:${m[5] || "00"}`
-    );
-    return isNaN(d.getTime()) ? null : d;
-  }
-  return null;
-}
-
-function dedupeRawEvents(events: RawEvent[]): RawEvent[] {
-  const seen = new Map<string, RawEvent>();
-  for (const e of events) {
-    const norm = (e.title || "").toLowerCase().replace(/\s+/g, " ").trim();
-    const dateKey = (e.datetime || "").slice(0, 10);
-    const key = `${norm}|${dateKey}`;
-    // Prefer the version with more detail (longer description, has URL, etc.)
-    const existing = seen.get(key);
-    if (!existing) {
-      seen.set(key, e);
-    } else {
-      const existingScore =
-        (existing.description?.length || 0) +
-        (existing.location ? 50 : 0) +
-        (existing.cost ? 30 : 0) +
-        (existing.url ? 40 : 0);
-      const newScore =
-        (e.description?.length || 0) +
-        (e.location ? 50 : 0) +
-        (e.cost ? 30 : 0) +
-        (e.url ? 40 : 0);
-      if (newScore > existingScore) seen.set(key, e);
-    }
-  }
-  return Array.from(seen.values());
 }
 
 function shortError(reason: any): string {
