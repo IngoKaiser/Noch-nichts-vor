@@ -153,17 +153,31 @@ export function toAppError(e: unknown): AppError {
   }
 
   // ---- Timeouts & network ----
-  if (err?.name === "AbortError" || /aborted|timeout/i.test(rawMsg)) {
+  if (err?.name === "AbortError" || /aborted|timed?\s*out|deadline/i.test(rawMsg)) {
     return {
       code: "timeout",
-      userMessage: "Die Anfrage hat zu lange gedauert. Bitte mit weniger Quellen erneut versuchen oder später nochmal.",
+      userMessage:
+        "Die Anfrage hat zu lange gedauert (über 90 Sek.). Mögliche Ursachen: viele oder langsame Quellen. Bitte erneut versuchen — beim zweiten Versuch sind viele Quellen bereits gecacht und antworten schnell.",
       detail: rawMsg,
     };
   }
-  if (/ECONN|ENOTFOUND|fetch failed|network/i.test(rawMsg)) {
+  if (
+    /load.failed|networkerror|fetch.failed|err_connection|err_network|err_internet/i.test(rawMsg) ||
+    /failed to fetch/i.test(rawMsg) ||
+    (status === undefined && /TypeError/.test(err?.name || ""))
+  ) {
     return {
       code: "network",
-      userMessage: "Netzwerkproblem beim Erreichen einer Quelle. Bitte erneut versuchen.",
+      userMessage:
+        "Verbindung zum Server unterbrochen. Bitte Internetverbindung prüfen und erneut versuchen. Falls das Problem weiter besteht, war der Server zu langsam (Timeout nach 90 Sek.).",
+      detail: rawMsg,
+    };
+  }
+  if (/ECONN|ENOTFOUND/i.test(rawMsg)) {
+    return {
+      code: "network",
+      userMessage:
+        "Eine der Quellen war nicht erreichbar. Andere Quellen werden trotzdem ausgewertet. Erneut versuchen oder die betroffene Quelle in den Einstellungen entfernen.",
       detail: rawMsg,
     };
   }

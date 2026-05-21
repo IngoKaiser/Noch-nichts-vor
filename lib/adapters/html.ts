@@ -38,7 +38,7 @@ export async function probeHtml(url: string): Promise<HtmlProbeResult> {
 export async function fetchHtmlEvents(
   url: string,
   sourceName: string,
-  context: { location: string; dateRange: string }
+  context: { location: string; rangeLabel: string; fromIso: string; toIso: string }
 ): Promise<RawEvent[]> {
   const html = await fetchText(url, 12_000);
   const text = extractEventListing(html, url);
@@ -149,24 +149,29 @@ async function structureWithHaiku(
   text: string,
   sourceUrl: string,
   sourceName: string,
-  context: { location: string; dateRange: string }
+  context: { location: string; rangeLabel: string; fromIso: string; toIso: string }
 ): Promise<RawEvent[]> {
   const client = getAnthropicClient();
 
-  const prompt = `Extrahiere konkrete Veranstaltungen aus diesem Webseitentext.
+  const today = new Date().toISOString().slice(0, 10);
+  const sameDay = context.fromIso === context.toIso;
+  const rangeDescription = sameDay
+    ? `am ${context.fromIso} (${context.rangeLabel})`
+    : `vom ${context.fromIso} bis ${context.toIso} (${context.rangeLabel})`;
 
-Stadt: ${context.location}
-Zeitraum: ${context.dateRange}
+  const prompt = `Extrahiere Veranstaltungen für ${context.location} ${rangeDescription} aus diesem Webseitentext.
+
 Quelle: ${sourceName} (${sourceUrl})
+Heutiges Datum: ${today}
+Gesuchter Zeitraum: ${rangeDescription}
 
-Hier ein Beispiel für gewünschten Output:
+WICHTIG — Zeitraum-Filter:
+- Extrahiere NUR Events, deren Datum im gesuchten Zeitraum liegt (zwischen ${context.fromIso} und ${context.toIso}, jeweils inklusive).
+- Events VOR ${context.fromIso} oder NACH ${context.toIso}: ignorieren.
+- Events ohne klares Datum: ignorieren (lieber zu wenige als falsche zeigen).
+- Dauerausstellungen, die im Zeitraum geöffnet haben: NUR einschließen, wenn sie speziell für den Zeitraum beworben werden.
 
-INPUT:
-"Sa., 30.04. 20:00 Uhr — Kammermusikabend [→ https://venue.de/events/123]
-Elbphilharmonie, Kleiner Saal · 25 €
-Quartett spielt Beethoven und Schostakowitsch."
-
-OUTPUT:
+Beispiel-Output:
 [
   {
     "title": "Kammermusikabend",
@@ -178,17 +183,15 @@ OUTPUT:
   }
 ]
 
-WICHTIG — was IGNORIERT wird:
+IGNORIEREN:
 - Cookie-Banner, Newsletter-Werbung, Datenschutzhinweise
-- Allgemeine Vereins- oder Veranstaltungsort-Beschreibungen ohne konkretes Datum
-- Archivierte Events (Datum in der Vergangenheit)
-- Navigation, Menüpunkte, "Alle Veranstaltungen anzeigen"-Links
-- Wiederholte Boilerplate-Texte
+- Allgemeine Veranstaltungsort-Beschreibungen ohne konkretes Datum
+- Navigation, "Alle Veranstaltungen"-Links
 
-REGELN:
-- "url": Wenn ein Link "[→ https://...]" zum konkreten Event führt (Pfad enthält /event/, /veranstaltung/, /termin/, oder eine ID): übernehmen. Sonst leer.
-- "datetime": Format "YYYY-MM-DD HH:MM" wenn Uhrzeit bekannt, sonst "YYYY-MM-DD". Heute = ${new Date().toISOString().slice(0, 10)}.
-- "location": Konkreter Ort/Veranstaltungsort. Leer wenn nicht ableitbar.
+REGELN für jedes Event:
+- "url": Wenn ein Link "[→ https://...]" eindeutig zu DIESEM Event führt: übernehmen. Sonst leer.
+- "datetime": IMMER "YYYY-MM-DD HH:MM" mit Uhrzeit wenn bekannt, sonst "YYYY-MM-DD". KEIN Eintrag ohne Jahr.
+- "location": Konkreter Ort. Leer wenn nicht ableitbar.
 - "cost": "frei" / "X €" / "ab X €". Leer wenn unbekannt.
 - "description": Max 25 Wörter, faktentreu.
 
@@ -197,7 +200,7 @@ Webseitentext:
 ${text}
 ---
 
-AUSSCHLIESSLICH JSON-Array, kein Markdown, keine Einleitung:`;
+AUSSCHLIESSLICH JSON-Array, kein Markdown, keine Einleitung. Wenn keine passenden Events im Zeitraum: []`;
 
   const response = await createWithRetry(client, {
     model: "claude-haiku-4-5-20251001",

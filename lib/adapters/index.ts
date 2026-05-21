@@ -79,11 +79,18 @@ export async function detectAdapter(url: string): Promise<AdapterInfo> {
 
 /**
  * Fetch events from a source using the configured adapter.
- * Returns RawEvent[] (no audience classification yet — that's a separate step).
+ *
+ * Asymmetric range handling:
+ * - JSON-LD/iCal/RSS: ignore range, return all events on the page/feed.
+ *   These adapters are cheap (no LLM), and the parse is the same effort.
+ *   Caller filters by range afterwards.
+ * - HTML+Haiku: pass the range into the prompt so Haiku extracts only
+ *   matching events. This is the expensive adapter — narrower range = fewer
+ *   output tokens = less cost. Cache key MUST include the range.
  */
 export async function fetchSourceEvents(
   source: EventSource,
-  context: { location: string; dateRange: string }
+  context: { location: string; rangeLabel: string; fromIso: string; toIso: string }
 ): Promise<RawEvent[]> {
   const adapter = source.adapter;
   if (!adapter) {
@@ -93,6 +100,7 @@ export async function fetchSourceEvents(
 
   switch (adapter.kind) {
     case "jsonld":
+      // Cheap parse — get everything, filter later
       return await fetchJsonLdEvents(source.url, source.name);
     case "ical":
       if (!adapter.endpoint) return [];
@@ -101,10 +109,9 @@ export async function fetchSourceEvents(
       if (!adapter.endpoint) return [];
       return await fetchRssEvents(adapter.endpoint, source.name, source.url);
     case "html":
+      // Expensive — pass range so Haiku narrows output
       return await fetchHtmlEvents(source.url, source.name, context);
     case "websearch":
-      // Legacy fallback — would call the old Sonnet+web_search path.
-      // Not implemented here to keep the new pipeline clean.
       return [];
     default:
       return [];

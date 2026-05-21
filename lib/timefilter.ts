@@ -24,20 +24,27 @@ export function computeDateRange(
   }
 
   if (filter === "weekend") {
-    const day = now.getDay(); // 0 So, 6 Sa
-    // If it's already weekend, use today + tomorrow if Saturday, or just today if Sunday
+    const day = now.getDay(); // 0 So, 1 Mo, ..., 6 Sa
+    // Weekend = Saturday + Sunday.
+    // If today is Saturday: today + tomorrow (Sun).
+    // If today is Sunday: today only.
+    // Otherwise: upcoming Saturday + Sunday.
     let satOffset: number;
+    let durationDays: number;
     if (day === 6) {
-      satOffset = 0; // today is Saturday
+      satOffset = 0; // today Sat
+      durationDays = 1; // Sat + Sun
     } else if (day === 0) {
-      satOffset = -1; // today is Sunday — show today only (yesterday was Sat)
+      satOffset = 0; // today Sun — start is today
+      durationDays = 0; // only today
     } else {
-      satOffset = 6 - day; // upcoming Saturday
+      satOffset = 6 - day; // upcoming Sat
+      durationDays = 1; // Sat + Sun
     }
     const start = new Date(startOfDay);
     start.setDate(now.getDate() + satOffset);
     const end = new Date(start);
-    end.setDate(start.getDate() + (day === 0 ? 0 : 1)); // Sat..Sun, or Sun-only
+    end.setDate(start.getDate() + durationDays);
     end.setHours(23, 59, 59, 999);
     return { from: start, to: end, label: "Wochenende" };
   }

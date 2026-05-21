@@ -56,25 +56,36 @@ export async function POST(req: NextRequest) {
 
     const cappedSources = (sources as EventSource[]).slice(0, 10);
     const range = computeDateRange(timeFilter as TimeFilter, customDate);
-    const dateRangeStr = `${range.from.toISOString().slice(0, 10)} bis ${range.to
-      .toISOString()
-      .slice(0, 10)}`;
+    const fromIso = range.from.toISOString().slice(0, 10);
+    const toIso = range.to.toISOString().slice(0, 10);
+    const rangeKey = `${fromIso}_${toIso}`;
 
-    // Per-source raw-events fetch with cache
+    // Per-source raw-events fetch with cache.
+    //
+    // Cache key strategy depends on the adapter:
+    // - jsonld/ical/rss: cheap to parse, return ALL events on page/feed.
+    //   Cache key has NO range — stays valid across all time filters.
+    // - html: passes range into Haiku prompt to keep output small.
+    //   Cache key INCLUDES the range — different ranges need different fetches.
     const sourceStatus: SourceStatus[] = [];
     const allRaw: RawEvent[] = [];
 
     const perSourceResults = await Promise.allSettled(
       cappedSources.map(async (source) => {
         const adapterKind = source.adapter?.kind || "html";
-        const rawKey = `events:raw:${source.url}:${adapterKind}`;
+        const isRangeSpecific = adapterKind === "html" || adapterKind === "websearch";
+        const rawKey = isRangeSpecific
+          ? `events:raw:${source.url}:${adapterKind}:${rangeKey}`
+          : `events:raw:${source.url}:${adapterKind}`;
         const rawHit = cacheGet<RawEvent[]>(rawKey);
         if (rawHit) {
           return { source, events: rawHit, fromCache: true };
         }
         const events = await fetchSourceEvents(source, {
           location,
-          dateRange: dateRangeStr,
+          rangeLabel: range.label,
+          fromIso,
+          toIso,
         });
         cacheSet(rawKey, events, RAW_TTL_SECONDS);
         return { source, events, fromCache: false };

@@ -58,16 +58,13 @@ export default function HomePage() {
   const [audienceFilter, setAudienceFilter] = useState<"all" | Audience>("all");
   const [categoryFilter, setCategoryFilter] = useState<"all" | Category>("all");
 
-  // Load active location on mount, auto-load today's events
+  // Load active location on mount, but do NOT auto-search.
+  // User picks a time filter first, then clicks search — avoids wasted
+  // calls when they actually wanted to search for a different time period.
   useEffect(() => {
     const rec = loadActiveLocation();
     setActiveRecord(rec);
     setHydrated(true);
-    if (rec) {
-      // Auto-load today's events for the active city
-      searchEventsInternal(rec.location, rec.sources, "today", "");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Tick once per second when an error has a retryAfter timestamp,
@@ -648,17 +645,7 @@ export default function HomePage() {
           ].map((f) => (
             <button
               key={f.k}
-              onClick={() => {
-                setTimeFilter(f.k);
-                if (f.k !== "custom") {
-                  searchEventsInternal(
-                    activeRecord.location,
-                    activeRecord.sources,
-                    f.k,
-                    ""
-                  );
-                }
-              }}
+              onClick={() => setTimeFilter(f.k)}
               style={{
                 ...S.filterBtn,
                 ...(timeFilter === f.k ? S.filterBtnActive : {}),
@@ -679,18 +666,30 @@ export default function HomePage() {
               style={S.dateInput}
               disabled={isBusy}
             />
-            <button
-              onClick={handleSearchEvents}
-              disabled={isBusy || !customDate}
-              style={{
-                ...S.searchBtn,
-                ...(isBusy || !customDate ? S.disabled : {}),
-              }}
-            >
-              <Search size={14} /> Suchen
-            </button>
           </div>
         )}
+
+        {/* Big search button — always visible after a city is active */}
+        <button
+          onClick={handleSearchEvents}
+          disabled={isBusy || (timeFilter === "custom" && !customDate)}
+          style={{
+            ...S.bigSearchBtn,
+            ...(isBusy || (timeFilter === "custom" && !customDate)
+              ? S.disabled
+              : {}),
+          }}
+        >
+          {isBusy ? (
+            <>
+              <Loader2 size={16} className="spin" /> Suche läuft…
+            </>
+          ) : (
+            <>
+              <Search size={16} /> Veranstaltungen suchen
+            </>
+          )}
+        </button>
 
         {/* STATUS / ERROR */}
         {isBusy && (
@@ -699,29 +698,46 @@ export default function HomePage() {
             <span>{statusMsg}</span>
           </div>
         )}
-        {error && (
-          <div style={S.errorBar}>
-            <AlertCircle size={14} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div>{error.userMessage}</div>
-              {error.retryAfter && (
-                <div style={S.errorCountdown}>
-                  {formatCountdown(error.retryAfter, now)}
-                </div>
-              )}
+        {error && (() => {
+          const isCritical =
+            error.code === "rate_limit_anthropic" ||
+            error.code === "rate_limit_tokens_per_minute" ||
+            error.code === "auth_invalid" ||
+            error.code === "auth_missing";
+          const isDailyLimit =
+            error.code === "rate_limit_anthropic" &&
+            error.retryAfter !== undefined &&
+            error.retryAfter - now > 60 * 60 * 1000; // more than 1h wait = daily/monthly
+          return (
+            <div style={isCritical ? S.errorBarCritical : S.errorBar}>
+              <AlertCircle size={isCritical ? 18 : 14} style={{ flexShrink: 0, marginTop: 2 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {isDailyLimit && (
+                  <div style={S.errorTitle}>Kontingent aufgebraucht</div>
+                )}
+                {isCritical && !isDailyLimit && (
+                  <div style={S.errorTitle}>Limit erreicht</div>
+                )}
+                <div>{error.userMessage}</div>
+                {error.retryAfter && (
+                  <div style={isCritical ? S.errorCountdownCritical : S.errorCountdown}>
+                    Wieder verfügbar {formatCountdown(error.retryAfter, now)}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={handleSearchEvents}
+                style={S.retryBtn}
+                disabled={
+                  isBusy ||
+                  (error.retryAfter !== undefined && error.retryAfter > now)
+                }
+              >
+                Erneut
+              </button>
             </div>
-            <button
-              onClick={handleSearchEvents}
-              style={S.retryBtn}
-              disabled={
-                isBusy ||
-                (error.retryAfter !== undefined && error.retryAfter > now)
-              }
-            >
-              Erneut
-            </button>
-          </div>
-        )}
+          );
+        })()}
 
         {/* EVENTS */}
         {events.length > 0 && (
@@ -1247,6 +1263,23 @@ const S: Record<string, React.CSSProperties> = {
     textTransform: "uppercase",
     letterSpacing: "0.04em",
   },
+  bigSearchBtn: {
+    width: "100%",
+    padding: "14px 20px",
+    fontSize: 14,
+    fontWeight: 700,
+    background: "var(--accent)",
+    color: "#fff",
+    border: "none",
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    marginBottom: 16,
+  },
 
   // Status
   statusBar: {
@@ -1273,6 +1306,28 @@ const S: Record<string, React.CSSProperties> = {
     borderRadius: 4,
     lineHeight: 1.4,
   },
+  errorBarCritical: {
+    padding: "16px 18px",
+    background: "#fde2dc",
+    border: "2px solid var(--accent)",
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 12,
+    marginBottom: 16,
+    fontSize: 13,
+    color: "var(--accent-dark)",
+    borderRadius: 6,
+    lineHeight: 1.45,
+    boxShadow: "0 2px 8px rgba(196, 69, 54, 0.15)",
+  },
+  errorTitle: {
+    fontSize: 14,
+    fontWeight: 800,
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    marginBottom: 6,
+    color: "var(--accent)",
+  },
   errorCountdown: {
     fontSize: 11,
     color: "var(--accent-dark)",
@@ -1280,6 +1335,17 @@ const S: Record<string, React.CSSProperties> = {
     marginTop: 4,
     fontWeight: 600,
     letterSpacing: "0.04em",
+  },
+  errorCountdownCritical: {
+    fontSize: 12,
+    color: "var(--accent)",
+    marginTop: 6,
+    fontWeight: 700,
+    letterSpacing: "0.04em",
+    padding: "4px 8px",
+    background: "rgba(196, 69, 54, 0.12)",
+    display: "inline-block",
+    borderRadius: 3,
   },
   retryBtn: {
     flexShrink: 0,
