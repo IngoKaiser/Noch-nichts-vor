@@ -53,6 +53,14 @@ export default function HomePage() {
   const [candidateSources, setCandidateSources] = useState<CandidateSource[] | null>(null);
   const [curationLocation, setCurationLocation] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  // Diagnostic info from the last search — used to show per-source results
+  // ("Source X returned 0 events") so user can see where the data is coming from.
+  const [searchMeta, setSearchMeta] = useState<{
+    sourceStatus?: Array<{ name: string; ok: boolean; count: number; fromCache?: boolean; note?: string }>;
+    finalCount?: number;
+    cappedFrom?: number;
+    fromCache?: boolean;
+  } | null>(null);
 
   // Display filters — operate on already-fetched events, no API call required
   const [audienceFilter, setAudienceFilter] = useState<"all" | Audience>("all");
@@ -121,6 +129,7 @@ export default function HomePage() {
       }
       const data = await res.json();
       setEvents(data.events as Event[]);
+      setSearchMeta(data.meta || null);
       setPhase("idle");
       setStatusMsg("");
     } catch (e: any) {
@@ -803,6 +812,14 @@ export default function HomePage() {
               {filteredEvents.length === events.length
                 ? `${events.length} Veranstaltung${events.length === 1 ? "" : "en"}`
                 : `${filteredEvents.length} von ${events.length} angezeigt`}
+              {searchMeta?.cappedFrom && (
+                <span style={S.resultCountNote}>
+                  {" "}· gekürzt von {searchMeta.cappedFrom}
+                </span>
+              )}
+              {searchMeta?.fromCache && (
+                <span style={S.resultCountNote}> · aus Cache</span>
+              )}
             </div>
 
             {filteredEvents.length === 0 ? (
@@ -888,9 +905,42 @@ export default function HomePage() {
           </>
         )}
 
-        {!isBusy && events.length === 0 && !error && (
+        {!isBusy && events.length === 0 && !error && searchMeta && (
           <div style={S.emptyResults}>
-            Keine Events für diesen Zeitraum gefunden.
+            <div style={{ marginBottom: 12, fontWeight: 600 }}>
+              Keine Events für diesen Zeitraum gefunden.
+            </div>
+            {searchMeta.sourceStatus && searchMeta.sourceStatus.length > 0 && (
+              <>
+                <div style={{ fontSize: 11, color: "var(--muted-fg)", marginBottom: 6 }}>
+                  Pro Quelle:
+                </div>
+                <div style={S.sourceStatusList}>
+                  {searchMeta.sourceStatus.map((s, i) => (
+                    <div key={i} style={S.sourceStatusRow}>
+                      <span style={s.ok ? S.sourceStatusOk : S.sourceStatusFail}>
+                        {s.ok ? "✓" : "✗"}
+                      </span>
+                      <span style={S.sourceStatusName}>{s.name}</span>
+                      <span style={S.sourceStatusCount}>
+                        {s.ok ? `${s.count}` : s.note || "Fehler"}
+                        {s.fromCache && " (Cache)"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted-fg)", marginTop: 10 }}>
+                  Tipp: Wenn alle Quellen 0 zurückgeben, hat die Suche für diesen
+                  Zeitraum tatsächlich nichts ergeben. Wenn einzelne Quellen Fehler
+                  zeigen, sind diese vielleicht gerade nicht erreichbar.
+                </div>
+              </>
+            )}
+          </div>
+        )}
+        {!isBusy && events.length === 0 && !error && !searchMeta && (
+          <div style={S.emptyResults}>
+            Wähle einen Zeitraum und tippe auf „Veranstaltungen suchen".
           </div>
         )}
       </main>
@@ -1206,6 +1256,46 @@ const S: Record<string, React.CSSProperties> = {
     textTransform: "uppercase",
     margin: "12px 0 10px",
     fontWeight: 600,
+  },
+  resultCountNote: {
+    fontWeight: 400,
+    opacity: 0.7,
+  },
+  sourceStatusList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    background: "var(--bg-elevated)",
+    padding: "10px 12px",
+    border: "1px solid var(--border)",
+    borderRadius: 4,
+  },
+  sourceStatusRow: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    fontSize: 12,
+  },
+  sourceStatusOk: {
+    color: "var(--accent-family)",
+    fontWeight: 700,
+    width: 14,
+    textAlign: "center" as const,
+  },
+  sourceStatusFail: {
+    color: "var(--accent)",
+    fontWeight: 700,
+    width: 14,
+    textAlign: "center" as const,
+  },
+  sourceStatusName: {
+    flex: 1,
+    color: "var(--fg)",
+  },
+  sourceStatusCount: {
+    color: "var(--muted-fg)",
+    fontVariantNumeric: "tabular-nums",
+    fontSize: 11,
   },
   badgeRow: {
     display: "inline-flex",

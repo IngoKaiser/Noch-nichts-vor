@@ -41,35 +41,37 @@ export async function fetchHtmlEvents(
   context: { location: string; rangeLabel: string; fromIso: string; toIso: string }
 ): Promise<RawEvent[]> {
   const html = await fetchText(url, 12_000);
-  const text = extractEventListing(html, url);
+  const text = extractEventListing(html, url, context);
   if (!text) return [];
 
-  // Cap to ~6k chars — much smaller than before, since pre-filter does the heavy lifting
-  const capped = text.length > 6500 ? text.slice(0, 6500) : text;
+  // Cap to ~18k chars (~4500 tokens). Previous 6500 was too aggressive —
+  // weekend events on a busy city portal would appear after position 10000+
+  // and get cut off, leading to empty weekend results.
+  const capped = text.length > 18_000 ? text.slice(0, 18_000) : text;
 
   return await structureWithHaiku(capped, url, sourceName, context);
 }
 
 /**
- * Extract just the event-listing portion of the page.
- * Tries multiple selector strategies in order of specificity.
+ * Extract the event-listing portion of the page.
+ * When a date range is provided, prefer lines that look related to that range.
  * Returns text with inline links preserved as "Text [→ URL]".
  */
-function extractEventListing(html: string, baseUrl: string): string {
+function extractEventListing(
+  html: string,
+  baseUrl: string,
+  context?: { fromIso: string; toIso: string }
+): string {
   const $ = cheerio.load(html);
   $("script, style, nav, footer, header, aside, noscript, iframe, svg, .cookie, .newsletter, form").remove();
 
   // Try increasingly broad selectors. First match wins.
   const selectorGroups = [
-    // Most specific: event-list-like containers
     [".event-list", ".events", ".veranstaltungen", ".termine", ".kalender",
      ".event-listing", ".veranstaltungsliste", "[id*=event]", "[class*=event-card]",
      "[class*=eventlist]", "[class*=termin]"],
-    // Generic content containers
     ["main", '[role="main"]', "#content", "#main", ".content", ".main"],
-    // Article-like
     ["article", ".articles"],
-    // Last resort
     ["body"],
   ];
 
@@ -109,36 +111,64 @@ function extractEventListing(html: string, baseUrl: string): string {
     }
   });
 
-  // Pre-filter: keep only lines that look event-related
-  // Heuristic: a line is kept if it contains a date pattern, time pattern,
-  // or a known event keyword — OR if the previous/next line did (context).
-  const eventKeywords = /\b(konzert|theater|ausstellung|festival|workshop|lesung|markt|fest|premiere|vortrag|musical|oper|kino|film|tanz|comedy|cabaret|party|club|bar|live|tour|gastspiel|matinee|vernissage|fĂĽhrung|stadtrundgang|stadtrundfahrt|kindertheater|familienkonzert|spielplatzfest|stadtteilfest|flohmarkt|wochenmarkt|weihnachtsmarkt)\b/i;
-  const datePattern = /\b(\d{1,2}[.\/]\d{1,2}[.\/]?(\d{2,4})?|\d{4}-\d{2}-\d{2}|mo|di|mi|do|fr|sa|so|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag|jan|feb|mär|apr|mai|jun|jul|aug|sep|okt|nov|dez)\b/i;
+  // Pre-filter heuristics
+  const eventKeywords = /\b(konzert|theater|ausstellung|festival|workshop|lesung|markt|fest|premiere|vortrag|musical|oper|kino|film|tanz|comedy|cabaret|party|club|bar|live|tour|gastspiel|matinee|vernissage|führung|stadtrundgang|stadtrundfahrt|kindertheater|familienkonzert|spielplatzfest|stadtteilfest|flohmarkt|wochenmarkt|weihnachtsmarkt)\b/i;
+  // Match date patterns (more carefully — short weekday abbreviations only when followed by punctuation/digits)
+  const datePattern = /\b(\d{1,2}\.\s*\d{1,2}\.?(\s*\d{2,4})?|\d{1,2}\/\d{1,2}\/?\d{0,4}|\d{4}-\d{2}-\d{2}|(?:mo|di|mi|do|fr|sa|so)\.|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag|jan(?:uar)?|feb(?:ruar)?|mär(?:z)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|dez(?:ember)?)\b/i;
   const timePattern = /\b(\d{1,2}[:\.]\d{2}\s*(uhr|h)?|\d{1,2}\s*uhr)\b/i;
 
   const isEventy = (line: string): boolean => {
     if (line.length < 5) return false;
-    if (line.length > 400) return false; // Likely paragraph text, not an event entry
+    if (line.length > 400) return false;
     return eventKeywords.test(line) || datePattern.test(line) || timePattern.test(line);
   };
 
-  // Two-pass: mark lines as keep/drop, then include neighbors of kept lines
+  // Build a relevance map for the requested date range, if any.
+  // A line is "in range" if it contains a date that falls between fromIso and toIso.
+  const rangeDayMatchers: RegExp[] = [];
+  if (context) {
+    const days = enumerateDays(context.fromIso, context.toIso);
+    for (const d of days) {
+      // Match "DD.MM.", "DD.MM.YYYY", "YYYY-MM-DD", "DD/MM", and weekday name
+      const dd = String(d.day).padStart(2, "0");
+      const mm = String(d.month).padStart(2, "0");
+      rangeDayMatchers.push(
+        new RegExp(`\\b${d.day}\\.\\s*${d.month}\\.?(\\s*${d.year})?\\b`),
+        new RegExp(`\\b${dd}\\.\\s*${mm}\\.?(\\s*${d.year})?\\b`),
+        new RegExp(`\\b${d.year}-${mm}-${dd}\\b`),
+        new RegExp(`\\b${d.weekday}\\b`, "i")
+      );
+    }
+  }
+
+  const isInRange = (line: string): boolean => {
+    if (rangeDayMatchers.length === 0) return false;
+    return rangeDayMatchers.some((r) => r.test(line));
+  };
+
+  // Two-pass: mark eventy lines, then include neighbors for context.
+  // Lines that match the target date range get a boost (kept even when long).
   const keep = new Array(lines.length).fill(false);
   for (let i = 0; i < lines.length; i++) {
-    if (isEventy(lines[i])) keep[i] = true;
+    if (isEventy(lines[i]) || isInRange(lines[i])) keep[i] = true;
   }
-  // Include 1 line before and after each kept line for context (date often on separate line from title)
   const finalKeep = [...keep];
   for (let i = 0; i < lines.length; i++) {
     if (keep[i]) {
       if (i > 0) finalKeep[i - 1] = true;
       if (i < lines.length - 1) finalKeep[i + 1] = true;
+      // Extra context when line matches the requested date — events typically
+      // span 3-5 lines in city portal listings
+      if (rangeDayMatchers.length > 0 && isInRange(lines[i])) {
+        if (i > 1) finalKeep[i - 2] = true;
+        if (i < lines.length - 2) finalKeep[i + 2] = true;
+      }
     }
   }
 
   const filtered = lines.filter((_, i) => finalKeep[i]).join("\n");
 
-  // If pre-filter was too aggressive (very short result), fall back to full text
+  // If pre-filter was too aggressive, fall back to full text
   if (filtered.length < 300 && lines.length > 5) {
     return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   }
@@ -153,7 +183,12 @@ async function structureWithHaiku(
 ): Promise<RawEvent[]> {
   const client = getAnthropicClient();
 
-  const today = new Date().toISOString().slice(0, 10);
+  // Use the date that the server's range calculation produced as "today
+  // anchor" for the prompt — not new Date() which on Vercel would be UTC
+  // and could be one day off from the user's local date.
+  // The fromIso for "today"/"tonight" filter equals today; for "weekend"
+  // it equals the upcoming/current Saturday — close enough as an anchor.
+  const today = context.fromIso;
   const sameDay = context.fromIso === context.toIso;
   const rangeDescription = sameDay
     ? `am ${context.fromIso} (${context.rangeLabel})`
@@ -204,7 +239,7 @@ AUSSCHLIESSLICH JSON-Array, kein Markdown, keine Einleitung. Wenn keine passende
 
   const response = await createWithRetry(client, {
     model: "claude-haiku-4-5-20251001",
-    max_tokens: 2500,
+    max_tokens: 4000,
     messages: [{ role: "user", content: prompt }],
   });
 
@@ -230,4 +265,34 @@ AUSSCHLIESSLICH JSON-Array, kein Markdown, keine Einleitung. Wenn keine passende
       sourceListingUrl: sourceUrl,
     };
   });
+}
+
+/**
+ * Enumerate calendar days between two ISO date strings (inclusive).
+ * Used by the pre-filter to detect lines that mention dates in range.
+ */
+function enumerateDays(
+  fromIso: string,
+  toIso: string
+): Array<{ year: number; month: number; day: number; weekday: string }> {
+  const weekdayNames = [
+    "sonntag", "montag", "dienstag", "mittwoch", "donnerstag", "freitag", "samstag",
+  ];
+  const result: Array<{ year: number; month: number; day: number; weekday: string }> = [];
+  const start = new Date(fromIso);
+  const end = new Date(toIso);
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return [];
+
+  const cursor = new Date(start);
+  // Hard cap at 14 days to keep regex count manageable
+  for (let i = 0; i < 14 && cursor <= end; i++) {
+    result.push({
+      year: cursor.getFullYear(),
+      month: cursor.getMonth() + 1,
+      day: cursor.getDate(),
+      weekday: weekdayNames[cursor.getDay()],
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return result;
 }

@@ -1,6 +1,22 @@
 import type { Event, TimeFilter, RawEvent } from "./types";
 
 /**
+ * Format a Date as a local-time YYYY-MM-DD string.
+ *
+ * IMPORTANT: Do not use `date.toISOString().slice(0, 10)` for this — that
+ * converts to UTC first, which can shift the date by one day when running
+ * in a non-UTC timezone (e.g., Vercel serverless runs UTC, user is in DE).
+ * Concrete failure mode: Saturday 00:30 local in Germany = Friday 22:30 UTC,
+ * so ISO date would read "Friday" while user expects "Saturday".
+ */
+export function localIsoDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
  * Compute the date range for a given filter.
  */
 export function computeDateRange(
@@ -24,27 +40,32 @@ export function computeDateRange(
   }
 
   if (filter === "weekend") {
-    const day = now.getDay(); // 0 So, 1 Mo, ..., 6 Sa
-    // Weekend = Saturday + Sunday.
-    // If today is Saturday: today + tomorrow (Sun).
-    // If today is Sunday: today only.
-    // Otherwise: upcoming Saturday + Sunday.
-    let satOffset: number;
-    let durationDays: number;
-    if (day === 6) {
-      satOffset = 0; // today Sat
-      durationDays = 1; // Sat + Sun
+    const day = now.getDay(); // 0 So, 1 Mo, ..., 5 Fr, 6 Sa
+    // Definition of "weekend":
+    // - Fri: today (Fri) through Sun — colloquially "weekend" includes Fri evening
+    // - Sat: today (Sat) + tomorrow (Sun)
+    // - Sun: today only (Sun)
+    // - Mon–Thu: the upcoming Saturday + Sunday
+    let startOffset: number;
+    let endOffset: number; // days from today to the end of the weekend
+    if (day === 5) {
+      startOffset = 0; // today Fri
+      endOffset = 2; // Fri..Sun
+    } else if (day === 6) {
+      startOffset = 0; // today Sat
+      endOffset = 1; // Sat..Sun
     } else if (day === 0) {
-      satOffset = 0; // today Sun — start is today
-      durationDays = 0; // only today
+      startOffset = 0; // today Sun
+      endOffset = 0; // Sun only
     } else {
-      satOffset = 6 - day; // upcoming Sat
-      durationDays = 1; // Sat + Sun
+      // Mon–Thu: upcoming weekend
+      startOffset = 6 - day; // days until Saturday
+      endOffset = 7 - day; // days until Sunday
     }
     const start = new Date(startOfDay);
-    start.setDate(now.getDate() + satOffset);
-    const end = new Date(start);
-    end.setDate(start.getDate() + durationDays);
+    start.setDate(now.getDate() + startOffset);
+    const end = new Date(startOfDay);
+    end.setDate(now.getDate() + endOffset);
     end.setHours(23, 59, 59, 999);
     return { from: start, to: end, label: "Wochenende" };
   }

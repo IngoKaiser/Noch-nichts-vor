@@ -10,6 +10,7 @@ import {
   dedupeRawEvents,
   dedupeEvents,
   capEvents,
+  localIsoDate,
 } from "@/lib/timefilter";
 import { errorResponse } from "@/lib/errors";
 import type { Event, EventSource, RawEvent, TimeFilter } from "@/lib/types";
@@ -56,8 +57,10 @@ export async function POST(req: NextRequest) {
 
     const cappedSources = (sources as EventSource[]).slice(0, 10);
     const range = computeDateRange(timeFilter as TimeFilter, customDate);
-    const fromIso = range.from.toISOString().slice(0, 10);
-    const toIso = range.to.toISOString().slice(0, 10);
+    // Use LOCAL ISO dates, not toISOString (which is UTC and would shift the
+    // date by one day at night in non-UTC timezones).
+    const fromIso = localIsoDate(range.from);
+    const toIso = localIsoDate(range.to);
     const rangeKey = `${fromIso}_${toIso}`;
 
     // Per-source raw-events fetch with cache.
