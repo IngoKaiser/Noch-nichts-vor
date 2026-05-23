@@ -3,6 +3,7 @@ export type SourceType =
   | "editorial"
   | "aggregator"
   | "venue"
+  | "funfair"
   | "tourism"
   | "commercial";
 

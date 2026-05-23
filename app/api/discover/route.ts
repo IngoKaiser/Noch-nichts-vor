@@ -67,21 +67,30 @@ export async function POST(req: NextRequest) {
 function buildDiscoveryPrompt(location: string): string {
   return `Du recherchierst für "${location}" in Deutschland Quellen für Veranstaltungshinweise.
 
-Suche per Websuche 10-12 geeignete Quellen aus diesen Kategorien:
+Suche per Websuche 11-14 geeignete Quellen aus diesen Kategorien:
 - "official": städtischer Veranstaltungskalender, Kulturamt
 - "editorial": Tageszeitung Events (z.B. MOPO, Hamburger Abendblatt, SZ Termine), Stadtmagazine (PRINZ, Szene, tip Berlin, Mitvergnügen)
 - "aggregator": Stadtportale (Rausgegangen, "Heute in Hamburg/München/Köln", Stadtbekannt, Ask Helmut, Kulturkurier)
 - "venue": wichtige Konzerthäuser, Theater, Museen mit Kalender
+- "funfair": Volksfest-, Jahrmarkt- und Kirmes-Portale — DIESE KATEGORIE NICHT VERGESSEN! Dazu gehören:
+    * der lokale große Rummel (z.B. "Hamburger Dom", "Cannstatter Wasen", "Cranger Kirmes")
+    * Schausteller-Betreiber, die ihre Stadtteil-Märkte listen (z.B. wags-hamburg.de für Hamburg)
+    * überregionale Kirmeskalender (kirmesmagazin.de, deutsche-volksfeste.de)
+    * Familienportale die Feste listen (z.B. kindaling.de)
 - "tourism": offizielle Tourismus-Site
 - "commercial": max 1-2 (Eventim, Reservix)
 
-WICHTIG: Aggregatoren wie Rausgegangen, "Heute in ${location}" und Tageszeitungs-Eventseiten dürfen NICHT fehlen, sofern sie existieren.
+WICHTIG:
+- Aggregatoren wie Rausgegangen, "Heute in ${location}" und Tageszeitungs-Eventseiten dürfen NICHT fehlen, sofern sie existieren.
+- Mindestens 1-2 "funfair"-Quellen einbinden, sofern es in/um ${location} Volksfeste, Jahrmärkte oder Stadtteilmärkte gibt. Stadtteil-Volksfeste (Frühjahrsmarkt, Pfingstfest, Herbstmarkt, Sommerfest) sind oft nur auf Schausteller- oder Spezialportalen gelistet, nicht im offiziellen Kalender.
 
 Führe gezielte Suchen durch:
 - "rausgegangen ${location}"
 - "heute in ${location}"
 - "${location} stadtmagazin veranstaltungen"
 - "${location} veranstaltungskalender"
+- "${location} volksfest jahrmarkt kirmes"
+- "${location} stadtteilmarkt schausteller"
 
 Gib AUSSCHLIESSLICH ein JSON-Array zurück, keine Einleitung, kein Markdown:
 
@@ -89,12 +98,12 @@ Gib AUSSCHLIESSLICH ein JSON-Array zurück, keine Einleitung, kein Markdown:
   {
     "name": "Name",
     "url": "https://...",
-    "type": "official"|"editorial"|"aggregator"|"venue"|"tourism"|"commercial",
+    "type": "official"|"editorial"|"aggregator"|"venue"|"funfair"|"tourism"|"commercial",
     "focus": "Was dort zu finden ist (max 12 Wörter)",
     "audience": "general"|"family"|"adult"|"mixed",
     "recommended": true|false
   }
 ]
 
-Setze "recommended": true für die 6-7 stärksten Quellen (offizieller Kalender, große Aggregatoren, redaktionelle Tagesübersichten). Bei den anderen false.`;
+Setze "recommended": true für die 7-8 stärksten Quellen (offizieller Kalender, große Aggregatoren, redaktionelle Tagesübersichten, mindestens eine funfair-Quelle). Bei den anderen false.`;
 }

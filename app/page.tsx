@@ -310,6 +310,7 @@ export default function HomePage() {
     editorial: "Redaktion",
     aggregator: "Aggregator",
     venue: "Venue",
+    funfair: "Volksfest",
     tourism: "Tourismus",
     commercial: "Kommerziell",
   };
@@ -319,6 +320,7 @@ export default function HomePage() {
     editorial: "#c44536",
     aggregator: "#0066cc",
     venue: "#6a4c93",
+    funfair: "#d97706",
     tourism: "#b8860b",
     commercial: "#7a6f61",
   };

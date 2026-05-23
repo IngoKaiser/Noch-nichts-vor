@@ -147,10 +147,11 @@ function extractEventListing(
   };
 
   // Two-pass: mark eventy lines, then include neighbors for context.
-  // Lines that match the target date range get a boost (kept even when long).
   const keep = new Array(lines.length).fill(false);
+  const inRangeLine = new Array(lines.length).fill(false);
   for (let i = 0; i < lines.length; i++) {
-    if (isEventy(lines[i]) || isInRange(lines[i])) keep[i] = true;
+    if (isInRange(lines[i])) inRangeLine[i] = true;
+    if (isEventy(lines[i]) || inRangeLine[i]) keep[i] = true;
   }
   const finalKeep = [...keep];
   for (let i = 0; i < lines.length; i++) {
@@ -159,10 +160,47 @@ function extractEventListing(
       if (i < lines.length - 1) finalKeep[i + 1] = true;
       // Extra context when line matches the requested date — events typically
       // span 3-5 lines in city portal listings
-      if (rangeDayMatchers.length > 0 && isInRange(lines[i])) {
+      if (inRangeLine[i]) {
         if (i > 1) finalKeep[i - 2] = true;
         if (i < lines.length - 2) finalKeep[i + 2] = true;
+        if (i < lines.length - 3) finalKeep[i + 3] = true;
       }
+    }
+  }
+
+  // PRIORITIZED ordering when a date range is active:
+  // Put blocks that contain an in-range date FIRST, so they survive the
+  // downstream character cap even on huge calendar pages (e.g. hamburg.de
+  // where a Poppenbüttel street fair is listed far below the big events).
+  if (rangeDayMatchers.length > 0) {
+    const priorityBlocks: string[] = [];
+    const restBlocks: string[] = [];
+    let block: string[] = [];
+    let blockHasInRange = false;
+
+    const flush = () => {
+      if (block.length === 0) return;
+      const text = block.join("\n");
+      if (blockHasInRange) priorityBlocks.push(text);
+      else restBlocks.push(text);
+      block = [];
+      blockHasInRange = false;
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+      if (!finalKeep[i]) {
+        // Gap between kept lines = block boundary
+        flush();
+        continue;
+      }
+      block.push(lines[i]);
+      if (inRangeLine[i]) blockHasInRange = true;
+    }
+    flush();
+
+    const ordered = [...priorityBlocks, ...restBlocks].join("\n\n");
+    if (ordered.length >= 300) {
+      return ordered.replace(/\n{3,}/g, "\n\n").trim();
     }
   }
 

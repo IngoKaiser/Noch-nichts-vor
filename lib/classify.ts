@@ -54,7 +54,7 @@ Für JEDES Event:
    - "stage": Theater, Comedy, Lesung, Cabaret, Oper, Musical, Tanz, Schauspiel, Improtheater
    - "art": Kunstausstellung, Museum, Galerie, Vernissage, Kunstführung, Skulpturen, Fotografie
    - "cinema": Kinofilm, Open-Air-Kino, Filmfestival, Filmpremiere, Filmvorführung
-   - "market": Stadtfest, Flohmarkt, Wochenmarkt, Weihnachtsmarkt, Stadtteilfest, Straßenfest, Spezialmarkt, Stadtführung, Stadtrundgang
+   - "market": Volksfest, Jahrmarkt, Kirmes, Rummel (z.B. Hamburger Dom), Pfingstfest, Stadtteil-Märkte (Frühjahrsmarkt, Herbstmarkt, Sommerfest), Stadtfest, Flohmarkt, Wochenmarkt, Weihnachtsmarkt, Straßenfest, Stadtführung. Volksfeste/Jahrmärkte IMMER "market", auch wenn es Live-Musik gibt.
    - "sport": Fußballspiel, Wettkampf, Lauf, Sportfest, Turnier, Yoga-Event, Lauftreff
    - "other": Workshop für Erwachsene, Vortrag, Party, Diskussion, politische Veranstaltung, Networking
 
@@ -164,12 +164,16 @@ function isFamily(text: string): boolean {
 }
 
 function guessCategory(text: string): Category {
-  // Order matters: more specific first
+  // Order matters: more specific first.
+  // Funfairs/markets checked BEFORE concert, because a "Volksfest mit Live-Musik"
+  // should be a market, not a concert. Includes Jahrmarkt/Volksfest/Dom/Rummel terms.
+  if (/\b(volksfest|jahrmarkt|kirmes|rummel|pfingstfest|pfingstmarkt|frühjahrsmarkt|frühlingsfest|herbstmarkt|sommerfest|stadtfest|stadtteilfest|straßenfest|dorffest|schützenfest|weinfest|hafenfest|flohmarkt|wochenmarkt|weihnachtsmarkt|adventsmarkt|spezialmarkt|kunsthandwerkermarkt|stadtführung|stadtrundgang|kirchweih|kirmes|hamburger dom|frühlingsdom|sommerdom|winterdom)\b/.test(text)) return "market";
+  // Generic "...fest" or "...markt" as a weaker market signal (after the strong list)
+  if (/\b(\w*fest|\w*markt(?!ing))\b/.test(text)) return "market";
   if (/\b(konzert|festival|band|chor|orchester|symphon|klassik|jazz|rock|pop|hip.?hop|techno|dj.set|musical(?!.?theater)|liederabend|orgelkonzert|songwriter)\b/.test(text)) return "concert";
   if (/\b(theater|schauspiel|oper(?!ette)?|operette|musical|comedy|kabarett|cabaret|lesung|tanz|ballet|improtheater|monolog|bühnenstück)\b/.test(text)) return "stage";
   if (/\b(ausstellung|museum|galerie|vernissage|kunstführung|skulptur|fotografie|gemälde|installation|kunsthalle)\b/.test(text)) return "art";
   if (/\b(kino|film|open.?air.?kino|filmpremiere|filmfestival|filmvorführung|cinema)\b/.test(text)) return "cinema";
-  if (/\b(stadtfest|flohmarkt|wochenmarkt|weihnachtsmarkt|straßenfest|stadtteilfest|markt(?!ing)|spezialmarkt|stadtführung|stadtrundgang|fest\b|kirchweih|kirmes)\b/.test(text)) return "market";
   if (/\b(fußball|spiel(?:tag)?|wettkampf|lauf|marathon|turnier|sport|yoga|fitness|bundesliga|spielzeit)\b/.test(text)) return "sport";
   return "other";
 }
